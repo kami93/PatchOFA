@@ -504,13 +504,22 @@ class Trainer(object):
                 if self.cfg.checkpoint.use_ema_weights_to_init_param and "extra_state" in state and "ema" in state["extra_state"]:
                     logger.info("use_ema_weights_to_init_param = True, will use EMA weights in the ckpt to init the model param...")
                     ema_state_dict = state["extra_state"]["ema_fp32_params"] if "ema_fp32_params" in state["extra_state"] else state["extra_state"]["ema"]
-                    self.model.load_state_dict(
-                        ema_state_dict, strict=True, model_cfg=self.cfg.model
+                    missing_keys, unexpected_keys = self.model.load_state_dict(
+                        ema_state_dict, strict=False, model_cfg=self.cfg.model
                     )
                 else:
-                    self.model.load_state_dict(
-                        state["model"], strict=True, model_cfg=self.cfg.model
+                    missing_keys, unexpected_keys = self.model.load_state_dict(
+                        state["model"], strict=False, model_cfg=self.cfg.model
                     )
+
+                if len(missing_keys):
+                    for name in missing_keys:
+                        logger.info(f"Missing key: {name}")
+
+                if len(unexpected_keys):
+                    for name in unexpected_keys:
+                        logger.info(f"Unexpected key: {name}")
+
                 # save memory for later steps
                 if not (self.cfg.ema.store_ema and (self.cfg.checkpoint.use_latest_weights_to_init_ema or not ("extra_state" in state and "ema" in state["extra_state"]))):
                     del state["model"]

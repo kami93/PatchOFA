@@ -34,7 +34,7 @@ class FileDataset:
         except Exception:
             self.slice_id = 0
             self.slice_count = 1
-        self.cached_index = cached_index
+        self.cached_index = True # cached_index
         self._init_seek_index()
         self._reader = self._get_reader()
         print("file {} slice_id {} row count {} total row count {}".format(
