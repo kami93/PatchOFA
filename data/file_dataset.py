@@ -6,7 +6,15 @@
 import os
 import torch
 import pickle
+import logging
+import time
 
+import torch.distributed as dist
+
+logger = logging.getLogger(__name__)
+is_master_process = (not dist.is_initialized()) or (
+    dist.is_initialized() and dist.get_rank() == 0
+)
 
 class FileDataset:
     def __init__(self, file_path, selected_col_ids=None, dtypes=None, separator="\t", cached_index=False):
@@ -44,15 +52,28 @@ class FileDataset:
     def _init_seek_index(self):
         if self.cached_index:
             cache_path = "{}.index".format(self.file_path)
-            assert os.path.exists(cache_path), "cache file {} not exists!".format(cache_path)
-            self.total_row_count, self.lineid_to_offset = pickle.load(open(cache_path, "rb"))
-            print("local datafile {} slice_id {} use cached row_count and line_idx-to-offset mapping".format(
-                self.file_path, self.slice_id))
+            while not os.path.exists(cache_path):
+                if is_master_process:
+                    logger.info(f"index cache file {cache_path} not exists!")
+                    logger.info(f"initializing a new one...")
+                    self._sweep_datafile()
+                    with open(cache_path, "wb") as fp:
+                        pickle.dump([self.total_row_count, self.lineid_to_offset], fp)
+                else:
+                    time.sleep(3)
+
+            with open(cache_path, "rb") as fp:
+                self.total_row_count, self.lineid_to_offset = pickle.load(fp)
+
         else:
-            # make an iteration over the file to get row_count and line_idx-to-offset mapping
-            fp = open(self.file_path, "r")
-            print("local datafile {} slice_id {} begin to initialize row_count and line_idx-to-offset mapping".format(
-                self.file_path, self.slice_id))
+            self._sweep_datafile()
+        
+        self._compute_start_pos_and_row_count()
+        logger.info("local datafile {} slice_id {} finished initializing row_count and line_idx-to-offset mapping".format(self.file_path, self.slice_id))
+
+    def _sweep_datafile(self):
+        # make an iteration over the file to get row_count and line_idx-to-offset mapping
+        with open(self.file_path, "r") as fp:
             self.total_row_count = 0
             offset = 0
             self.lineid_to_offset = []
@@ -60,9 +81,6 @@ class FileDataset:
                 self.lineid_to_offset.append(offset)
                 self.total_row_count += 1
                 offset += len(line.encode('utf-8'))
-        self._compute_start_pos_and_row_count()
-        print("local datafile {} slice_id {} finished initializing row_count and line_idx-to-offset mapping".format(
-            self.file_path, self.slice_id))
 
     def _compute_start_pos_and_row_count(self):
         self.row_count = self.total_row_count // self.slice_count

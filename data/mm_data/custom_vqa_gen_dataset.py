@@ -127,6 +127,8 @@ def collate(samples, pad_idx, eos_idx):
             "patch_images": patch_images,
             "patch_masks": patch_masks,
             "prev_output_tokens": prev_output_tokens,
+        },
+        "aux_input": {
             "eos_idx": src_lengths - 1,
             "noun_idx": noun_idx_all,
             "noun_batch_idx": noun_batch_idx_all,

@@ -22,8 +22,8 @@ from .unify_transformer import TransformerModel
 logger = logging.getLogger(__name__)
 
 
-@register_model("ofa")
-class OFAModel(TransformerModel):
+@register_model("patchofa")
+class PatchOFAModel(TransformerModel):
     __jit_unused_properties__ = ["supported_targets"]
 
     def __init__(self, args, encoder, decoder):
@@ -38,7 +38,7 @@ class OFAModel(TransformerModel):
 
     @staticmethod
     def add_args(parser):
-        super(OFAModel, OFAModel).add_args(parser)
+        super(PatchOFAModel, PatchOFAModel).add_args(parser)
         parser.add_argument(
             "--pooler-dropout",
             type=float,
@@ -198,7 +198,7 @@ class OFAModel(TransformerModel):
                         name, num_classes, prev_num_classes, inner_dim, prev_inner_dim
                     )
                 )
-        self.classification_heads[name] = OFAClassificationHead(
+        self.classification_heads[name] = PatchOFAClassificationHead(
             input_dim=self.args.encoder_embed_dim,
             inner_dim=inner_dim or self.args.encoder_embed_dim,
             num_classes=num_classes,
@@ -314,7 +314,7 @@ class OFAModel(TransformerModel):
                     state_dict[prefix + "classification_heads." + k] = v
 
 
-class OFAClassificationHead(nn.Module):
+class PatchOFAClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
 
     def __init__(
@@ -363,8 +363,8 @@ class OFAClassificationHead(nn.Module):
         return x
 
 
-@register_model_architecture("ofa", "ofa_large")
-def ofa_large_architecture(args):
+@register_model_architecture("patchofa", "patchofa_large")
+def patchofa_large_architecture(args):
     args.encoder_embed_path = getattr(args, "encoder_embed_path", None)
     args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 1024)
     args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 4 * 1024)
@@ -434,8 +434,8 @@ def ofa_large_architecture(args):
     args.orig_patch_image_size = getattr(args, "orig_patch_image_size", 256)
 
 
-@register_model_architecture("ofa", "ofa_base")
-def ofa_base_architecture(args):
+@register_model_architecture("patchofa", "patchofa_base")
+def patchofa_base_architecture(args):
     args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 768)
     args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 4 * 768)
     args.encoder_layers = getattr(args, "encoder_layers", 6)
@@ -443,11 +443,11 @@ def ofa_base_architecture(args):
     args.decoder_layers = getattr(args, "decoder_layers", 6)
     args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 12)
     args.resnet_type = getattr(args, "resnet_type", "resnet101")
-    ofa_large_architecture(args)
+    patchofa_large_architecture(args)
 
 
-@register_model_architecture("ofa", "ofa_huge")
-def ofa_huge_architecture(args):
+@register_model_architecture("patchofa", "patchofa_huge")
+def patchofa_huge_architecture(args):
     args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 1280)
     args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 4 * 1280)
     args.encoder_layers = getattr(args, "encoder_layers", 24)
@@ -455,11 +455,11 @@ def ofa_huge_architecture(args):
     args.decoder_layers = getattr(args, "decoder_layers", 12)
     args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 16)
     args.resnet_type = getattr(args, "resnet_type", "resnet152")
-    ofa_large_architecture(args)
+    patchofa_large_architecture(args)
 
 
-@register_model_architecture("ofa", "ofa_medium")
-def ofa_medium_architecture(args):
+@register_model_architecture("patchofa", "patchofa_medium")
+def patchofa_medium_architecture(args):
     args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 512)
     args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 4 * 512)
     args.encoder_layers = getattr(args, "encoder_layers", 4)
@@ -467,10 +467,10 @@ def ofa_medium_architecture(args):
     args.decoder_layers = getattr(args, "decoder_layers", 4)
     args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 8)
     args.resnet_type = getattr(args, "resnet_type", "resnet101")
-    ofa_large_architecture(args)
+    patchofa_large_architecture(args)
 
 
-@register_model_architecture("ofa", "ofa_tiny")
+@register_model_architecture("patchofa", "patchofa_tiny")
 def ofa_tiny_architecture(args):
     args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 256)
     args.encoder_ffn_embed_dim = getattr(args, "encoder_ffn_embed_dim", 4 * 256)
@@ -479,4 +479,4 @@ def ofa_tiny_architecture(args):
     args.decoder_layers = getattr(args, "decoder_layers", 4)
     args.decoder_attention_heads = getattr(args, "decoder_attention_heads", 4)
     args.resnet_type = getattr(args, "resnet_type", "resnet50")
-    ofa_large_architecture(args)
+    patchofa_large_architecture(args)

@@ -198,7 +198,7 @@ class CustomCriterion(FairseqCriterion):
         if self.use_rdrop:
             construct_rdrop_sample(sample)
 
-        net_output = model(**sample["net_input"])
+        net_output = model(**sample["net_input"], **sample["aux_input"])
         loss, nll_loss, global_loss, noun_loss, ntokens = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
@@ -276,13 +276,13 @@ class CustomCriterion(FairseqCriterion):
         p_glo = F.log_softmax(img_glo_logit, dim=-1)
 
         _global_cross = torch.einsum('bd,bd->b', q_glo, p_glo)
-        global_loss = -_global_cross.mean()
+        global_loss = -_global_cross.sum()
 
         word_loc_logit = noun_logits.get('word_loc_logit')
         img_loc_logit = noun_logits.get('img_loc_logit')
         noun_loss = global_loss.new_zeros(size=(1, ))
         if word_loc_logit is not None and word_loc_logit is not None:   
-            noun_batch_idx = sample["net_input"]['noun_batch_idx']
+            noun_batch_idx = sample["aux_input"]['noun_batch_idx']
             bsz = word_glo_logit.size(0)
 
             q_loc = F.softmax(word_loc_logit, dim=-1)
@@ -295,7 +295,7 @@ class CustomCriterion(FairseqCriterion):
 
             counts_repeat = counts[noun_batch_idx]
 
-            noun_loss = -(_local_cross / counts_repeat / bsz).sum()
+            noun_loss = -(_local_cross / counts_repeat).sum()
 
         loss = loss + global_loss + noun_loss
 

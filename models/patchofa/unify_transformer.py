@@ -127,7 +127,7 @@ class PromptEncoder(torch.nn.Module):
         return past_key_values
 
 
-@register_model("unify_transformer")
+@register_model("custom_unify_transformer")
 class TransformerModel(FairseqEncoderDecoderModel):
     """
     Transformer model from `"Attention Is All You Need" (Vaswani, et al, 2017)
@@ -1683,7 +1683,7 @@ def Linear(in_features, out_features, bias=True):
     return m
 
 
-@register_model_architecture("unify_transformer", "unify_transformer")
+@register_model_architecture("custom_unify_transformer", "custom_unify_transformer")
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, "encoder_embed_path", None)
     args.encoder_embed_dim = getattr(args, "encoder_embed_dim", 512)
