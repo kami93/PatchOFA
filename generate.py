@@ -156,6 +156,7 @@ def main(cfg: DictConfig, **kwargs):
                 words = words_batch[idx]
                 image = raw_information[idx]['image']
                 uniq_id = raw_information[idx]['uniq_id']
+                line_id = raw_information[idx]['line_id']
 
                 num_words += len(words)
                 # img = np.asarray(image)
@@ -171,7 +172,7 @@ def main(cfg: DictConfig, **kwargs):
                 output_dir = osp.join(
                         '/input/nfs-3090-s00/shpark/cache/OFA/vqa_ref_ofa_large',
                         'train',
-                        f'{uniq_id}.pkl')
+                        f'{uniq_id}_{line_id}.pkl')
                 pool.apply_async(save_pickle, (output_dict, output_dir))
 
                 # cv2.rectangle(

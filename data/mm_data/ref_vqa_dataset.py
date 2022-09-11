@@ -175,10 +175,10 @@ class RefVQADataset(OFADataset):
 
     def __getitem__(self, index):
         item = self.dataset[index]
-        if len(item) == 5:
+        if len(item) == 6:
+            uniq_id, image, line_id, question, ref, predict_objects = item
+        elif len(item) == 5:
             uniq_id, image, question, ref, predict_objects = item
-        else:
-            uniq_id, image, question, ref, predict_objects, caption = item
 
         image = Image.open(BytesIO(base64.urlsafe_b64decode(image))) # .convert("RGB")
         patch_image = self.patch_resize_transform(image)
@@ -248,7 +248,8 @@ class RefVQADataset(OFADataset):
             "object": predict_object_seq,
             "answer": answers,
             "image": image,
-            "uniq_id": uniq_id
+            "uniq_id": uniq_id,
+            "line_id": line_id
         }
 
         src_items = dict()
