@@ -4,3 +4,4 @@ from .refcoco import RefcocoTask
 from .snli_ve import SnliVeTask
 from .vqa_gen import VqaGenTask
 from .custom_vqa_gen import CustomVqaGenTask
+from .refvqa import RefVQATask

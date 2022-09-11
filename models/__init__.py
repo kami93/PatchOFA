@@ -1,2 +1,3 @@
 from .ofa import OFAModel, ofa_base_architecture, ofa_large_architecture, ofa_huge_architecture
 from .patchofa import PatchOFAModel, patchofa_base_architecture, patchofa_large_architecture, patchofa_huge_architecture
+from .custom_ofa_refVQAgen import CustomOFAModel, customofa_base_architecture, customofa_large_architecture, customofa_huge_architecture, customofa_tiny_architecture
