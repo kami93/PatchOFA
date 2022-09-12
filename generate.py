@@ -170,9 +170,9 @@ def main(cfg: DictConfig, **kwargs):
                     output_dict[word] = coord_list
 
                 output_dir = osp.join(
-                        '/input/nfs-3090-s00/shpark/cache/OFA/vqa_ref_ofa_large',
-                        'train',
-                        f'{uniq_id}_{line_id}.pkl')
+                        '/input/nfs-3090-s00/shpark/cache/OFA/refvqa',
+                        'vqa_train_with_lineid_p0.1_seed0',
+                        f'{line_id}.pkl')
                 pool.apply_async(save_pickle, (output_dict, output_dir))
 
                 # cv2.rectangle(
