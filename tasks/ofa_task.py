@@ -32,7 +32,15 @@ class OFAConfig(FairseqDataclass):
     )
     selected_cols: Optional[str] = field(
         default=None,
-        metadata={"help": "selected cols"},
+        metadata={"help": "selected cols (default if [train, eval]_selected_cols is not provided)"},
+    )
+    train_selected_cols: Optional[str] = field(
+        default=None,
+        metadata={"help": "selected cols for train"},
+    )
+    eval_selected_cols: Optional[str] = field(
+        default=None,
+        metadata={"help": "selected cols for valid/eval"},
     )
     bpe: Optional[str] = field(
         default='gpt2',
