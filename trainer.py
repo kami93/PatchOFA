@@ -514,20 +514,27 @@ class Trainer(object):
 
                 if len(missing_keys):
                     for name in missing_keys:
-                        logger.info(f"Missing key: {name}")
+                        logger.info(f"Missing a model parameter: {name}")
 
                 if len(unexpected_keys):
                     for name in unexpected_keys:
-                        logger.info(f"Unexpected key: {name}")
+                        logger.info(f"Unexpected a model parameter: {name}")
 
                 # save memory for later steps
                 if not (self.cfg.ema.store_ema and (self.cfg.checkpoint.use_latest_weights_to_init_ema or not ("extra_state" in state and "ema" in state["extra_state"]))):
                     del state["model"]
-                if utils.has_parameters(self.get_criterion()):
-                    self.get_criterion().load_state_dict(
-                        state["criterion"], strict=True
-                    )
+                
+                if utils.has_parameters(self.get_criterion()) and state["criterion"]:
+                    missing_keys, unexpected_keys = self.get_criterion().load_state_dict(state["criterion"], strict=False)
                     del state["criterion"]
+                    
+                    if len(missing_keys):
+                        for name in missing_keys:
+                            logger.info(f"Missing a criterion parameter: {name}")
+
+                    if len(unexpected_keys):
+                        for name in unexpected_keys:
+                            logger.info(f"Unexpected a criterion parameter: {name}")
 
             except Exception:
                 raise Exception(

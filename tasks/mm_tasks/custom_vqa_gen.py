@@ -18,7 +18,7 @@ from fairseq import metrics
 from fairseq.tasks import register_task
 
 from models import search
-from data.mm_data.custom_vqa_gen_dataset import VqaGenDataset
+from data.mm_data.custom_vqa_gen_dataset import CustomVqaGenDataset
 from data import data_utils
 from tasks.ofa_task import OFAConfig, OFATask
 from utils.trie import Trie
@@ -55,7 +55,10 @@ class CustomVqaGenConfig(OFAConfig):
         default=None,
         metadata={"help": "path to load ans2label file"},
     )
-
+    box_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "path to load refvqa box directory"},
+    )
     add_object: bool = field(
         default=False,
         metadata={"help": "add object to encoder"},
@@ -106,11 +109,15 @@ class CustomVqaGenTask(OFATask):
 
         if split == 'train':
             table_path = paths[(epoch - 1) % (len(paths) - 1)]
+            selected_cols = getattr(self.cfg, 'train_selected_cols', None) or self.cfg.selected_cols
+
         else:
             table_path = paths[-1]
-        dataset = FileDataset(table_path, self.cfg.selected_cols)
+            selected_cols = getattr(self.cfg, 'eval_selected_cols', None) or self.cfg.selected_cols
 
-        self.datasets[split] = VqaGenDataset(
+        dataset = FileDataset(table_path, selected_cols)
+
+        self.datasets[split] = CustomVqaGenDataset(
             split,
             dataset,
             self.bpe,
@@ -123,7 +130,8 @@ class CustomVqaGenTask(OFATask):
             add_object=self.cfg.add_object,
             constraint_trie=self.constraint_trie,
             imagenet_default_mean_and_std=self.cfg.imagenet_default_mean_and_std,
-            prompt_type=self.cfg.prompt_type
+            prompt_type=self.cfg.prompt_type,
+            box_dir=self.cfg.box_dir
         )
 
     def build_model(self, cfg):

@@ -71,11 +71,6 @@ class PatchOFAModel(TransformerModel):
         src_tokens,
         src_lengths,
         prev_output_tokens,
-        eos_idx, # sample['net_input']['src_lengths'] - 1
-        noun_idx: Optional[torch.Tensor] = None,
-        noun_batch_idx: Optional[torch.Tensor] = None,
-        object_idx: Optional[torch.Tensor] = None,
-        object_batch_idx: Optional[torch.Tensor] = None,
         patch_images: Optional[torch.Tensor] = None,
         patch_images_2: Optional[torch.Tensor] = None,
         patch_masks: Optional[torch.Tensor] = None,
@@ -126,46 +121,7 @@ class PatchOFAModel(TransformerModel):
                     x = head(sentence_representation)
                     break
     
-        encoder_out = extra['encoder_information']['encoder_out'][0]
-        # encoder_out: L x B x D
-        
-        image_encoding = encoder_out[:900] # L의 첫 900까지가 이미지 패치
-        image_encoding = image_encoding.transpose(0, 1) # 'l b d -> b l d'
-        text_encoding = encoder_out[900:]
-
-        eos_batch_idx = torch.arange(len(eos_idx))
-        eos_tensor = text_encoding[eos_idx, eos_batch_idx]
-
-        noun_tensor = None
-        if noun_idx is not None:
-            noun_tensor = text_encoding[noun_idx, noun_batch_idx]
-
-        glo_tokens, loc_tokens = self.ca_head(image_encoding, noun_tensor, noun_batch_idx)
-        glo_tokens = glo_tokens.squeeze(1)
-
-        img_glo = self.img_head(glo_tokens)
-        text_glo = self.text_head(eos_tensor)
-
-        if loc_tokens is not None:
-            loc_tokens = loc_tokens.squeeze(1)
-            img_loc = self.img_head(loc_tokens)
-            text_loc = self.text_head(noun_tensor)
-
-        else:
-            img_loc = None
-            text_loc = None
-        
-        word_glo_logit, img_glo_logit, word_loc_logit, img_loc_logit = self.dino_logit(img_glo, img_loc, text_glo, text_loc, 1, noun_batch_idx)
-
-        extra['instance_logits'] = {
-            'word_glo_logit': word_glo_logit,
-            'img_glo_logit': img_glo_logit,
-        }
-
-        extra['noun_logits'] = {
-            'word_loc_logit': word_loc_logit,
-            'img_loc_logit': img_loc_logit
-        }
+        extra['encoder_returns'] = encoder_out
 
         return x, extra
 

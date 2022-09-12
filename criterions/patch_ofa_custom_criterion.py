@@ -15,6 +15,7 @@ from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.dataclass import FairseqDataclass
 from omegaconf import II
 
+from .selfpatch import SelfPatchHead, DINOHead, DINOLogit
 
 @dataclass
 class CustomCriterionConfig(FairseqDataclass):
@@ -57,7 +58,27 @@ class CustomCriterionConfig(FairseqDataclass):
         default=None,
         metadata={"help": "constraint range"}
     )
-
+    embed_dim: int = field(
+        default=256, metadata={"help": "embedding dimesion for patch-level head"}
+    )
+    num_heads: int = field(
+        default=4, metadata={"help": "num heads for patch-level head"}
+    )
+    k_num: int = field(
+        default=4, metadata={"help": "top-k selection around a patch"}
+    )
+    out_dim: int = field(
+        default=4096, metadata={"help": "output dimesion for patch-level head"}
+    )
+    warmup_temp: float = field(
+        default=0.04, metadata={"help": "warmup temp"}
+    )
+    temp: float = field(
+        default=0.04, metadata={"help": "temp"}
+    )
+    warmup_temp_epochs: int = field(
+        default=0, metadata={"help": "warmup_temp_epochs"}
+    )
 
 def construct_rdrop_sample(x):
     if isinstance(x, dict):
@@ -146,7 +167,14 @@ class CustomCriterion(FairseqCriterion):
         use_rdrop=False,
         reg_alpha=1.0,
         sample_patch_num=196,
-        constraint_range=None
+        constraint_range=None,
+        embed_dim=256,
+        num_heads=4,
+        k_num=4,
+        out_dim=4096,
+        warmup_temp=0.04,
+        temp=0.04,
+        warmup_temp_epochs=0
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -166,6 +194,36 @@ class CustomCriterion(FairseqCriterion):
             constraint_start, constraint_end = constraint_range.split(',')
             self.constraint_start = int(constraint_start)
             self.constraint_end = int(constraint_end)
+
+
+        self.ca_head = SelfPatchHead(in_dim=embed_dim,
+                                     num_heads=num_heads,
+                                     k_num=k_num)
+        self.img_head = DINOHead(in_dim=embed_dim,
+                                 out_dim=out_dim)
+        self.text_head = DINOHead(in_dim=embed_dim,
+                                  out_dim=out_dim)
+
+        self.img_local_logit = DINOLogit(out_dim=out_dim,
+                                         warmup_temp=warmup_temp,
+                                         warmup_temp_epochs=warmup_temp_epochs,
+                                         temp=temp,
+                                         name='img_local')
+        self.img_global_logit = DINOLogit(out_dim=out_dim,
+                                          warmup_temp=warmup_temp,
+                                          warmup_temp_epochs=warmup_temp_epochs,
+                                          temp=temp,
+                                          name='img_global')
+        self.text_local_logit = DINOLogit(out_dim=out_dim,
+                                          warmup_temp=warmup_temp,
+                                          warmup_temp_epochs=warmup_temp_epochs,
+                                          temp=temp,
+                                          name='text_local')
+        self.text_global_logit = DINOLogit(out_dim=out_dim,
+                                           warmup_temp=warmup_temp,
+                                           warmup_temp_epochs=warmup_temp_epochs,
+                                           temp=temp,
+                                           name='text_global')
 
     def forward(self, model, sample, update_num=0, reduce=True):
         """Compute the loss for the given sample.
@@ -198,19 +256,23 @@ class CustomCriterion(FairseqCriterion):
         if self.use_rdrop:
             construct_rdrop_sample(sample)
 
-        net_output = model(**sample["net_input"], **sample["aux_input"])
-        loss, nll_loss, global_loss, noun_loss, ntokens = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
+        net_output = model(**sample["net_input"]) # **sample["aux_input"]
+        loss, nll_loss, global_loss, local_loss, ntokens, batch_size, patch_token_size = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
+
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
+        global_loss = global_loss * sample_size
+        local_loss = local_loss * sample_size
+
         logging_output = {
             "loss": loss.data,
             "nll_loss": nll_loss.data,
             "global_loss": global_loss.data,
-            "noun_loss": noun_loss.data,
+            "local_loss": local_loss.data,
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
-            "sample_size": sample_size,
+            "sample_size": sample_size
         }
         if self.report_accuracy:
             n_correct, total = self.compute_accuracy(model, net_output, sample)
@@ -267,39 +329,56 @@ class CustomCriterion(FairseqCriterion):
         )
 
         extra = net_output[1]
-        instance_logits = extra['instance_logits']
-        noun_logits = extra['noun_logits']
+        encoder_returns = extra.pop("encoder_returns")
+        encoder_out = encoder_returns["encoder_out"][0]
+
+        aux_input = sample.get("aux_input")
         
-        word_glo_logit = instance_logits.get('word_glo_logit')
-        img_glo_logit = instance_logits.get('img_glo_logit')
-        q_glo = F.softmax(word_glo_logit, dim=-1)
-        p_glo = F.log_softmax(img_glo_logit, dim=-1)
+        eos_idx = aux_input.get("eos_idx")
+        noun_idx = aux_input.get("noun_idx")
+        noun_batch_idx = aux_input.get("noun_batch_idx")
+        noun_patch_mask = aux_input.get("noun_patch_mask")
 
-        _global_cross = torch.einsum('bd,bd->b', q_glo, p_glo)
-        global_loss = -_global_cross.sum()
+        _, B, D = encoder_out.shape
+        L = noun_idx.size(0)
+        image_encoding = encoder_out[:900]
+        image_encoding = image_encoding.transpose(0, 1) # '(H W) B D -> B (H W) D'
+        text_encoding = encoder_out[900:] # 'T B D'
 
-        word_loc_logit = noun_logits.get('word_loc_logit')
-        img_loc_logit = noun_logits.get('img_loc_logit')
-        noun_loss = global_loss.new_zeros(size=(1, ))
-        if word_loc_logit is not None and word_loc_logit is not None:   
-            noun_batch_idx = sample["aux_input"]['noun_batch_idx']
-            bsz = word_glo_logit.size(0)
+        eos_tokens = torch.gather(text_encoding, dim=0, index=eos_idx.unsqueeze(0).unsqueeze(-1).expand(-1, -1, D)).squeeze(0) # 'B D'
+        noun_tokens = text_encoding[noun_idx, noun_batch_idx]
+        
+        text_tokens = torch.cat([eos_tokens, noun_tokens], dim=0)
+        img_tokens = self.ca_head(image_encoding, noun_batch_idx, noun_patch_mask)
 
-            q_loc = F.softmax(word_loc_logit, dim=-1)
-            p_loc = F.log_softmax(img_loc_logit, dim=-1)
+        img_project = self.img_head(img_tokens)
+        text_project = self.text_head(text_tokens)
 
-            _local_cross = torch.einsum('wd,wd->w', q_loc, p_loc)
+        img_global, img_local = img_project.split([B, L], dim=0)
+        text_global, text_local = text_project.split([B, L], dim=0)
 
-            counts = torch.zeros(size=(bsz, ), device=_local_cross.device, dtype=torch.float)
-            counts.scatter_add_(dim=0, index=noun_batch_idx, src=torch.ones_like(noun_batch_idx, dtype=torch.float))
+        img_global_logit = self.img_global_logit(img_global)
+        img_local_logit = self.img_local_logit(img_local)
+        
+        text_global_logit = self.text_global_logit(text_global)
+        text_local_logit = self.text_local_logit(text_local)
 
-            counts_repeat = counts[noun_batch_idx]
+        img_logit = torch.cat([img_global_logit, img_local_logit], dim=0)
+        text_logit = torch.cat([text_global_logit, text_local_logit], dim=0)
 
-            noun_loss = -(_local_cross / counts_repeat).sum()
+        q_vector = F.softmax(text_logit, dim=-1)
+        p_vector = F.log_softmax(img_logit, dim=-1)
 
-        loss = loss + global_loss + noun_loss
+        patch_loss = -(torch.einsum('bd,bd->b', q_vector, p_vector))
 
-        return loss, nll_loss, global_loss, noun_loss, ntokens
+        global_loss, local_loss = patch_loss.split([B, L], dim=0)
+        global_loss = global_loss.mean(0)
+        local_loss = local_loss.mean(0)
+        
+        batch_size = B
+        patch_token_size = L
+
+        return loss, nll_loss, global_loss, local_loss, ntokens, batch_size, patch_token_size
 
     def compute_accuracy(self, model, net_output, sample):
         lprobs, target = self.get_lprobs_and_target(model, net_output, sample)
@@ -318,7 +397,7 @@ class CustomCriterion(FairseqCriterion):
         # loss_sum_v2 = sum(log.get("loss_v2", 0) for log in logging_outputs)
         nll_loss_sum = sum(log.get("nll_loss", 0) for log in logging_outputs)
         global_loss_sum = sum(log.get("global_loss", 0) for log in logging_outputs)
-        noun_loss_sum = sum(log.get("noun_loss", 0) for log in logging_outputs)
+        local_loss_sum = sum(log.get("local_loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
@@ -338,15 +417,14 @@ class CustomCriterion(FairseqCriterion):
             "nll_loss", nll_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_scalar(
-            "global_loss_sum", global_loss_sum, 1, round=3
+            "global_loss", global_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_scalar(
-            "noun_loss_sum", noun_loss_sum, 1, round=3
+            "local_loss", local_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_derived(
             "ppl", lambda meters: utils.get_perplexity(meters["nll_loss"].avg)
         )
-
         metrics.log_scalar(
             "ntokens", ntokens, 1, round=3
         )

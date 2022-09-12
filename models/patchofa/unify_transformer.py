@@ -36,8 +36,6 @@ from .unify_transformer_layer import TransformerEncoderLayer, TransformerDecoder
 from .resnet import ResNet
 from .frozen_bn import FrozenBatchNorm2d
 
-from .selfpatch import SelfPatchHead, DINOHead, DINOLogit
-
 import logging
 logger = logging.getLogger(__name__)
 
@@ -150,18 +148,6 @@ class TransformerModel(FairseqEncoderDecoderModel):
         self.args = args
         self.supports_align_args = True
 
-        self.ca_head = SelfPatchHead(in_dim=args.encoder_embed_dim,
-                                     num_heads=args.encoder_attention_heads,
-                                     k_num=50)
-        self.img_head = DINOHead(in_dim=args.encoder_embed_dim,
-                                 out_dim=4096)
-        self.text_head = DINOHead(in_dim=args.encoder_embed_dim,
-                                  out_dim=4096)
-
-        self.dino_logit = DINOLogit(out_dim=4096,
-                                    warmup_temp=0.04,
-                                    warmup_temp_epochs=0,
-                                    temp=0.04)
     @staticmethod
     def add_args(parser):
         """Add model-specific arguments to the parser."""
@@ -1578,7 +1564,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         if self.project_out_dim is not None:
             x = self.project_out_dim(x)
 
-        return x, {"attn": [attn], "inner_states": inner_states, "encoder_information": encoder_out}
+        return x, {"attn": [attn], "inner_states": inner_states}
 
     def output_layer(self, features):
         """Project features to the vocabulary size."""

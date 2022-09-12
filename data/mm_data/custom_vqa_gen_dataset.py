@@ -7,6 +7,8 @@ from io import BytesIO
 
 import logging
 import warnings
+import os.path as osp
+import pickle as pkl
 
 import numpy as np
 import torch
@@ -86,36 +88,43 @@ def collate(samples, pad_idx, eos_idx):
         ntokens = src_lengths.sum().item()
 
     noun_idx_all = []
+    noun_patch_mask_all = []
     noun_batch_idx_all = []
     for batch_idx, s in enumerate(samples):
         if s['noun_idx'] is not None:
             noun_idx_all.append(s['noun_idx'])
+            noun_patch_mask_all.append(s['noun_patch_mask'])
             noun_batch_idx_all.append(s['noun_batch_idx']+batch_idx)
     
     if len(noun_idx_all):
         noun_idx_all = torch.cat(noun_idx_all)
+        noun_patch_mask_all = torch.cat(noun_patch_mask_all)
         noun_batch_idx_all = torch.cat(noun_batch_idx_all)
     else:
         noun_idx_all = None
+        noun_patch_mask_all = None
         noun_batch_idx_all = None
 
     object_idx_all = []
+    object_patch_mask_all = []
     object_batch_idx_all = []
     for batch_idx, s in enumerate(samples):
         if s['object_idx'] is not None:
             object_idx_all.append(s['object_idx'])
+            object_patch_mask_all.append(s['object_patch_mask'])
             object_batch_idx_all.append(s['object_batch_idx']+batch_idx)
     
     if len(object_idx_all):
         object_idx_all = torch.cat(object_idx_all)
+        object_patch_mask_all = torch.cat(object_patch_mask_all)
         object_batch_idx_all = torch.cat(object_batch_idx_all)
     else:
         object_idx_all = None
+        object_patch_mask_all = None
         object_batch_idx_all = None
 
-    raw_information = None
-    if samples[0].get("raw_information", None) is not None:
-        raw_information = np.array([s['raw_information'] for s in samples])
+    raw_information = [s['raw_information'] for s in samples]
+    boxes = [s['boxes'] for s in samples]
 
     batch = {
         "id": id,
@@ -132,8 +141,10 @@ def collate(samples, pad_idx, eos_idx):
             "eos_idx": src_lengths - 1,
             "noun_idx": noun_idx_all,
             "noun_batch_idx": noun_batch_idx_all,
+            "noun_patch_mask": noun_patch_mask_all,
             "object_idx": object_idx_all,
-            "object_batch_idx": object_batch_idx_all
+            "object_batch_idx": object_batch_idx_all,
+            "object_patch_mask": object_patch_mask_all
         },
         "conf": conf,
         "ref_dict": ref_dict,
@@ -141,13 +152,14 @@ def collate(samples, pad_idx, eos_idx):
         "decoder_prompts": decoder_prompts,
         "target": target,
         "prefix_tokens": prefix_tokens,
-        "raw_information": raw_information
+        "raw_information": raw_information,
+        "boxes": boxes
     }
 
     return batch
 
 
-class VqaGenDataset(OFADataset):
+class CustomVqaGenDataset(OFADataset):
     def __init__(
         self,
         split,
@@ -159,20 +171,27 @@ class VqaGenDataset(OFADataset):
         max_object_length=30,
         max_tgt_length=30,
         patch_image_size=224,
+        patch_size=16,
         add_object=False,
         constraint_trie=None,
         imagenet_default_mean_and_std=False,
-        prompt_type="none"
+        prompt_type="none",
+        box_dir=None,
     ):
         super().__init__(split, dataset, bpe, src_dict, tgt_dict)
         self.max_src_length = max_src_length
         self.max_object_length = max_object_length
         self.max_tgt_length = max_tgt_length
         self.patch_image_size = patch_image_size
+        self.patch_size = patch_size
+        self.num_patches = self.patch_image_size // self.patch_size
 
         self.add_object = add_object
         self.constraint_trie = constraint_trie
         self.prompt_type = prompt_type
+        self.box_dir = box_dir
+        if self.box_dir is not None and not osp.exists(self.box_dir):
+            raise ValueError(f"box_dir not exists: {box_dir}")
 
         if imagenet_default_mean_and_std:
             mean = IMAGENET_DEFAULT_MEAN
@@ -188,15 +207,39 @@ class VqaGenDataset(OFADataset):
             transforms.Normalize(mean=mean, std=std),
         ])
 
+    # def _get_boxes(self, uniq_id: int, line_id: int) -> dict:
+        
+
     def __getitem__(self, index):
         item = self.dataset[index]
-        if len(item) == 5:
+        if len(item) == 6:
+            uniq_id, image, line_id, question, ref, predict_objects = item
+        elif len(item) == 5:
+            line_id = None
             uniq_id, image, question, ref, predict_objects = item
-        else:
-            uniq_id, image, question, ref, predict_objects, caption = item
 
         image = Image.open(BytesIO(base64.urlsafe_b64decode(image)))
+        w, h = image.size
+
         patch_image = self.patch_resize_transform(image)
+
+        boxes = None
+        if line_id is not None:
+            boxes_file = osp.join(self.box_dir, self.split, f'{line_id}.pkl')
+            with open(boxes_file, "rb") as f:
+                boxes = pkl.load(f)
+
+            new_boxes = dict()
+            patch_boxes = dict()
+            for name, box in boxes.items():
+                new_box = box.copy()
+                new_box[::2] = new_box[::2] * self.patch_image_size / w
+                new_box[1::2] = new_box[1::2] * self.patch_image_size / h
+                new_boxes[name] = new_box
+                patch_boxes[name] = (new_box/self.patch_size).astype(np.int)
+
+            boxes = new_boxes
+
         patch_mask = torch.tensor([True])
 
         question = self.pre_question(question, self.max_src_length)
@@ -205,6 +248,7 @@ class VqaGenDataset(OFADataset):
 
         src_item = []
         noun_idx = []
+        noun_patch_mask = []
         idx = 0
         pos_tag = nltk.pos_tag(question[:-1].split())
         for word, tag in pos_tag:
@@ -213,6 +257,17 @@ class VqaGenDataset(OFADataset):
             idx += len(tokens)
             if tag in {'NN', 'NNS', 'NNPS', 'NNP'}:
                 noun_idx.append(idx-1)
+
+                if boxes is not None:
+                    box = patch_boxes.get(word)
+                    box_mask = torch.full(size=(self.num_patches, self.num_patches), fill_value=float("-inf"))
+                    
+                    try:
+                        box_mask[box[1]:box[3], box[0]:box[2]] = 0.0
+                    except:
+                        import pdb; pdb.set_trace()
+                        abc = 1
+                    noun_patch_mask.append(box_mask.flatten())
 
         src_item.append(self.encode_text('?'))
 
@@ -231,6 +286,7 @@ class VqaGenDataset(OFADataset):
             # predict_object_item = self.encode_text(" object: {}".format(predict_object_seq))
             
             object_idx = []
+            object_patch_mask = []
             predict_object_item = [self.encode_text(" object:")]
             idx = 2
             for word in predict_object_seq.split():
@@ -238,6 +294,17 @@ class VqaGenDataset(OFADataset):
                 predict_object_item.append(tokens)
                 idx += len(tokens)
                 object_idx.append(idx-1)
+
+                if boxes is not None:
+                    box = patch_boxes.get(word)
+                    box_mask = torch.full(size=(self.num_patches, self.num_patches), fill_value=float("-inf"))
+                    
+                    try:
+                        box_mask[box[1]:box[3], box[0]:box[2]] = 0.0
+                    except:
+                        import pdb; pdb.set_trace()
+                        abc = 1
+                    object_patch_mask.append(box_mask.flatten())
 
             predict_object_item = torch.cat(predict_object_item)
 
@@ -289,10 +356,13 @@ class VqaGenDataset(OFADataset):
             "ref_dict": ref_dict,
             "conf": conf,
             "noun_idx": noun_idx if len(noun_idx) else None,
+            "noun_patch_mask": torch.stack(noun_patch_mask) if boxes is not None and len(noun_idx) else None,
             "noun_batch_idx": torch.zeros_like(noun_idx) if len(noun_idx) else None,
             "object_idx": object_idx if len(object_idx) else None,
+            "object_patch_mask": torch.stack(object_patch_mask) if boxes is not None and len(object_idx) else None,
             "object_batch_idx": torch.zeros_like(object_idx) if len(object_idx) else None,
-            "raw_information": raw_information
+            "raw_information": raw_information,
+            "boxes": boxes
         }
         if self.constraint_trie is not None:
             # NLP 에서 같이 나오면 안되는 단어들에 대한 트리를 쓰는 알고리즘.
