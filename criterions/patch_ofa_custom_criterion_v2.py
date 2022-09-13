@@ -77,6 +77,9 @@ class CustomCriterionV2Config(FairseqDataclass):
     aggregation_num_heads: int = field(
         default=4, metadata={"help": "aggregation_num_heads; reference: 4 heads for 256 dim feature"}
     )
+    no_text_loss: bool = field(
+        default=False, metadata={"help": "do not use text_loss"}
+    )
     # dict_dim: int = field(
     #     default=256, metadata={"help": "input dimesion for dict_head note: (59457, 256) for OFA-tiny dictionary"}
     # )
@@ -185,7 +188,8 @@ class CustomCriterionV2(FairseqCriterion):
         dictionary_size=59457,
         embed_dim=256,
         patch_aggregation_type='attention_text_token',
-        aggregation_num_heads=4
+        aggregation_num_heads=4,
+        no_text_loss=False,
         # dict_head_type='linear',
         # dict_dim=4096,
         # out_dim=4096,
@@ -204,6 +208,7 @@ class CustomCriterionV2(FairseqCriterion):
         self.use_rdrop = use_rdrop
         self.reg_alpha = reg_alpha
         self.sample_patch_num = sample_patch_num
+        self.use_text_loss = not no_text_loss
 
         self.constraint_start = None
         self.constraint_end = None
@@ -226,7 +231,7 @@ class CustomCriterionV2(FairseqCriterion):
             # self.text_head = nn.Linear(in_features=embed_dim, out_features=dictionary_size)
 
         elif token_head_type == 'mlp':
-            self.token_head = HeadMlp(in_features=embed_dim, hidden_features=dictionary_size, out_features=dictionary_size)
+            self.token_head = HeadMlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size)
             # self.img_head = Mlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size)
             # self.text_head = Mlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size)
             self.token_head_initialized = True
@@ -411,8 +416,11 @@ class CustomCriterionV2(FairseqCriterion):
             token_ids = src_tokens[text_batch_idx, text_idx]
             text_tokens = text_encoding[text_batch_idx, text_idx]
 
-            text_logit = self.token_head(text_tokens)
-            text_loss = F.cross_entropy(text_logit, token_ids, reduction='mean')
+            if self.use_text_loss:
+                text_logit = self.token_head(text_tokens)
+                text_loss = F.cross_entropy(text_logit, token_ids, reduction='mean')
+            else:
+                text_loss = torch.zeros(size=(1, ), device=encoder_out.device)
 
             patch_encoding = None
             if self.patch_aggregation_type == 'attention_text_token':
