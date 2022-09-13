@@ -257,19 +257,23 @@ class CustomCriterion(FairseqCriterion):
             construct_rdrop_sample(sample)
 
         net_output = model(**sample["net_input"]) # **sample["aux_input"]
-        loss, nll_loss, global_loss, local_loss, ntokens, batch_size, patch_token_size = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
+        loss, nll_loss, global_loss, local_noun_loss, local_object_loss, ntokens, batch_size, patch_token_size = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
 
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
         global_loss = global_loss * sample_size
-        local_loss = local_loss * sample_size
+        local_noun_loss = local_noun_loss * sample_size
+        local_object_loss = local_object_loss * sample_size
+
+        loss = loss + global_loss + local_noun_loss + local_object_loss
 
         logging_output = {
             "loss": loss.data,
             "nll_loss": nll_loss.data,
             "global_loss": global_loss.data,
-            "local_loss": local_loss.data,
+            "local_noun_loss": local_noun_loss.data,
+            "local_object_loss": local_object_loss.data,
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size
@@ -339,17 +343,46 @@ class CustomCriterion(FairseqCriterion):
         noun_batch_idx = aux_input.get("noun_batch_idx")
         noun_patch_mask = aux_input.get("noun_patch_mask")
 
+        object_idx = aux_input.get("object_idx")
+        object_batch_idx = aux_input.get("object_batch_idx")
+        object_patch_mask = aux_input.get("object_patch_mask")
+
         _, B, D = encoder_out.shape
-        L = noun_idx.size(0)
+        LN = noun_idx.size(0)
+        LO = object_idx.size(0)
+
+        use_noun = True
+        use_object = True
+
         image_encoding = encoder_out[:900]
         image_encoding = image_encoding.transpose(0, 1) # '(H W) B D -> B (H W) D'
         text_encoding = encoder_out[900:] # 'T B D'
 
         eos_tokens = torch.gather(text_encoding, dim=0, index=eos_idx.unsqueeze(0).unsqueeze(-1).expand(-1, -1, D)).squeeze(0) # 'B D'
-        noun_tokens = text_encoding[noun_idx, noun_batch_idx]
+
+        L = 0
+        text_tokens = []
+        text_batch_idx = []
+        text_patch_mask = []
+        if use_noun:
+            noun_tokens = text_encoding[noun_idx, noun_batch_idx]
+            text_tokens.append(noun_tokens)
+            text_batch_idx.append(noun_batch_idx)
+            text_patch_mask.append(noun_patch_mask)
+            L += LN
         
-        text_tokens = torch.cat([eos_tokens, noun_tokens], dim=0)
-        img_tokens = self.ca_head(image_encoding, noun_batch_idx, noun_patch_mask)
+        if use_object:
+            object_tokens = text_encoding[object_idx, object_batch_idx]
+            text_tokens.append(object_tokens)
+            text_batch_idx.append(object_batch_idx)
+            text_patch_mask.append(object_patch_mask)
+            L += LO
+        
+        text_tokens = torch.cat([eos_tokens] + text_tokens, dim=0)
+        text_batch_idx = torch.cat(text_batch_idx, dim=0)
+        text_patch_mask = torch.cat(text_patch_mask, dim=0)
+
+        img_tokens = self.ca_head(image_encoding, text_batch_idx, text_patch_mask)
 
         img_project = self.img_head(img_tokens)
         text_project = self.text_head(text_tokens)
@@ -372,13 +405,24 @@ class CustomCriterion(FairseqCriterion):
         patch_loss = -(torch.einsum('bd,bd->b', q_vector, p_vector))
 
         global_loss, local_loss = patch_loss.split([B, L], dim=0)
+        
+        if use_noun and use_object:
+            local_noun_loss, local_object_loss = local_loss.split([LN, LO], dim=0)
+        elif use_noun:
+            local_noun_loss = local_loss
+            local_object_loss = torch.zeros(size=(1, ), device=local_loss.device)
+        elif use_object:
+            local_noun_loss = torch.zeros(size=(1, ), device=local_loss.device)
+            local_object_loss = local_loss
+
         global_loss = global_loss.mean(0)
-        local_loss = local_loss.mean(0)
+        local_noun_loss = local_noun_loss.mean(0)
+        local_object_loss = local_object_loss.mean(0)
         
         batch_size = B
         patch_token_size = L
 
-        return loss, nll_loss, global_loss, local_loss, ntokens, batch_size, patch_token_size
+        return loss, nll_loss, global_loss, local_noun_loss, local_object_loss, ntokens, batch_size, patch_token_size
 
     def compute_accuracy(self, model, net_output, sample):
         lprobs, target = self.get_lprobs_and_target(model, net_output, sample)
@@ -397,7 +441,8 @@ class CustomCriterion(FairseqCriterion):
         # loss_sum_v2 = sum(log.get("loss_v2", 0) for log in logging_outputs)
         nll_loss_sum = sum(log.get("nll_loss", 0) for log in logging_outputs)
         global_loss_sum = sum(log.get("global_loss", 0) for log in logging_outputs)
-        local_loss_sum = sum(log.get("local_loss", 0) for log in logging_outputs)
+        local_noun_loss_sum = sum(log.get("local_noun_loss", 0) for log in logging_outputs)
+        local_object_loss_sum = sum(log.get("local_object_loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
@@ -420,7 +465,10 @@ class CustomCriterion(FairseqCriterion):
             "global_loss", global_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_scalar(
-            "local_loss", local_loss_sum / sample_size, ntokens, round=3
+            "local_noun_loss", local_noun_loss_sum / sample_size, ntokens, round=3
+        )
+        metrics.log_scalar(
+            "local_object_loss", local_object_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_derived(
             "ppl", lambda meters: utils.get_perplexity(meters["nll_loss"].avg)
