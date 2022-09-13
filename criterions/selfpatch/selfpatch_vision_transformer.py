@@ -199,6 +199,39 @@ class PatchAggregationHead(nn.Module):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
+    
+    @torch.no_grad()
+    def cossim_filter(self, img, aggr_seed, batch_idx, patch_mask):
+        B, HW, D = img.size()
+        L = batch_idx.size(0)
+        device = img.device
+
+        img_norm = nn.functional.normalize(img, dim=-1)
+        img_norm = img_norm[batch_idx]
+
+        aggr_norm = nn.functional.normalize(aggr_seed, dim=-1)
+
+        sim_matrix = torch.einsum("ld,lpd->lp", aggr_norm, img_norm)
+        sim_matrix += patch_mask
+        sorted_idx = sim_matrix.argsort(-1, descending=True)
+
+        bool_mask = ~patch_mask.bool()
+        n_box_patches = bool_mask.sum(-1, keepdim=True)
+        top_p = torch.arange(HW, device=device).unsqueeze(0).expand(L, -1) < (n_box_patches * self.cosim_p)
+        n_filtered_patches = top_p.sum(-1)
+        
+        top_idx = sorted_idx[top_p]
+        top_batch_idx = torch.arange(L, device=device).repeat_interleave(n_filtered_patches)
+
+        new_patch_mask = torch.full_like(patch_mask, float('-inf'))
+        new_patch_mask[top_batch_idx, top_idx] = 0.0
+
+        # Sanity check
+        # for i in range(L):
+        #     mask_trues = (patch_mask[i]==0).sum()
+        #     overap_trues = ((patch_mask[i]==new_patch_mask[i]) & (patch_mask[i]==0)).sum()
+
+        return new_patch_mask
 
     def forward(self, img, aggr_seed, batch_idx, patch_mask):
         """
@@ -207,29 +240,12 @@ class PatchAggregationHead(nn.Module):
         batch_idx: 'L'
         patch_mask: 'L (H W)'
         """
-        B, HW, D = img.size()
+        # B, HW, D = img.size()
         L = batch_idx.size(0)
 
-        ###############################################################################
-        ##################### filter self.k_num masks using cosim #####################
-        #  
-        # with torch.no_grad():
-        #     img_norm = nn.functional.normalize(img, dim=-1)
-        #     img_norm = img_norm[batch_idx]
+        if self.cosim_p < 1.0:
+            patch_mask = self.cossim_filter(img, aggr_seed, batch_idx, patch_mask)
 
-        #     aggr_norm = nn.functional.normalize(aggr_seed, dim=-1)
-
-        #     sim_matrix = torch.einsum("ld,lpd->lp", aggr_norm, img_norm)
-        #     sim_matrix += patch_mask
-
-        #     import pdb; pdb.set_trace()
-
-        #     _, top_idx = sim_matrix.topk(k=self.k_num, dim=-1)
-            
-        #     img_topk = img[word_batch_idx.unsqueeze(-1).expand(-1, self.k_num), top_idx]
-        #
-        ###############################################################################
-        ###############################################################################
         img_repeat = img[batch_idx]
         
         if self.cls_token is not None:

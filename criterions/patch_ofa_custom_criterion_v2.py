@@ -74,6 +74,9 @@ class CustomCriterionV2Config(FairseqDataclass):
     patch_aggregation_type: str = field(
         default='attention_text_token', metadata={"help": "type for patch aggregation: attention_text_token | attention_cls_token | cossim_top | average | ignore"}
     )
+    aggregation_cosim_p: float = field(
+        default=1.0, metadata={"help": "aggregation_cosim_p; aggregate those with top p percent high cosine similiarity"}
+    )
     aggregation_num_heads: int = field(
         default=4, metadata={"help": "aggregation_num_heads; reference: 4 heads for 256 dim feature"}
     )
@@ -189,6 +192,7 @@ class CustomCriterionV2(FairseqCriterion):
         embed_dim=256,
         patch_aggregation_type='attention_text_token',
         aggregation_num_heads=4,
+        aggregation_cosim_p=1.0,
         no_text_loss=False,
         # dict_head_type='linear',
         # dict_dim=4096,
@@ -241,9 +245,9 @@ class CustomCriterionV2(FairseqCriterion):
 
         self.patch_aggregation_type = patch_aggregation_type
         if patch_aggregation_type == 'attention_text_token':
-            self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=False)
+            self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=False, cosim_p=aggregation_cosim_p)
         elif patch_aggregation_type == 'attention_cls_token':
-            self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=True)
+            self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=True, cosim_p=aggregation_cosim_p)
         elif patch_aggregation_type in {'ignore', 'cossim_top'}:
             self.aggregation = None
         else:
