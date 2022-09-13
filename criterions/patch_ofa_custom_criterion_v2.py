@@ -72,7 +72,7 @@ class CustomCriterionV2Config(FairseqDataclass):
         default=256, metadata={"help": "embedding dimesion for token_head"}
     )
     patch_aggregation_type: str = field(
-        default='attention_text_token', metadata={"help": "type for patch aggregation: attention_text_token | attention_cls_token | random_sample | average | ignore"}
+        default='attention_text_token', metadata={"help": "type for patch aggregation: attention_text_token | attention_cls_token | cossim_top | average | ignore"}
     )
     aggregation_num_heads: int = field(
         default=4, metadata={"help": "aggregation_num_heads; reference: 4 heads for 256 dim feature"}
@@ -244,7 +244,7 @@ class CustomCriterionV2(FairseqCriterion):
             self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=False)
         elif patch_aggregation_type == 'attention_cls_token':
             self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=True)
-        elif patch_aggregation_type == 'ignore':
+        elif patch_aggregation_type in {'ignore', 'cossim_top'}:
             self.aggregation = None
         else:
             raise NotImplementedError(f"patch_aggregation_type {patch_aggregation_type} is not implemented.")
@@ -433,6 +433,19 @@ class CustomCriterionV2(FairseqCriterion):
                                                   aggr_seed=text_tokens,
                                                   batch_idx=text_batch_idx,
                                                   patch_mask=text_patch_mask)
+            
+            elif self.patch_aggregation_type == 'cossim_top':
+                with torch.no_grad():
+                    img_norm = nn.functional.normalize(image_encoding, dim=-1)
+                    img_norm = img_norm[text_batch_idx]
+
+                    text_norm = nn.functional.normalize(text_tokens, dim=-1)
+
+                    sim_matrix = torch.einsum("ld,lpd->lp", text_norm, img_norm)
+                    sim_matrix += text_patch_mask
+
+                    _, top_idx = sim_matrix.topk(k=1, dim=-1)
+                patch_encoding = image_encoding[text_batch_idx.unsqueeze(-1).expand(-1, 1), top_idx].squeeze(1)
 
             if patch_encoding is not None:
                 img_logit = self.token_head(patch_encoding)
