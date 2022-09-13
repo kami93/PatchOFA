@@ -17,7 +17,7 @@ from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.dataclass import FairseqDataclass
 from omegaconf import II
 
-from .selfpatch import PatchAggregationHead, DINOHead, DINOLogit, Mlp
+from .selfpatch import PatchAggregationHead, DINOHead, DINOLogit, HeadMlp
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +226,7 @@ class CustomCriterionV2(FairseqCriterion):
             # self.text_head = nn.Linear(in_features=embed_dim, out_features=dictionary_size)
 
         elif token_head_type == 'mlp':
-            self.token_head = nn.Linear(in_features=embed_dim, out_features=dictionary_size)
+            self.token_head = HeadMlp(in_features=embed_dim, hidden_features=dictionary_size, out_features=dictionary_size)
             # self.img_head = Mlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size)
             # self.text_head = Mlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size)
             self.token_head_initialized = True
