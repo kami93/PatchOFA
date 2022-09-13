@@ -274,7 +274,7 @@ class DINOHead(nn.Module):
 
 class DINOLogit(nn.Module):
     def __init__(self, out_dim, warmup_temp,
-                 warmup_temp_epochs, nepochs=10000, temp=0.1,
+                 warmup_temp_iters, temp=0.1,
                  center_momentum=0.9, name=None):
         super().__init__()
         self.temp = temp
@@ -287,21 +287,25 @@ class DINOLogit(nn.Module):
         # a too high temperature makes the training instable at the beginning
         self.teacher_temp_schedule = np.concatenate((
             np.linspace(warmup_temp,
-                        temp, warmup_temp_epochs),
-            np.ones(nepochs - warmup_temp_epochs) * temp
+                        temp, warmup_temp_iters),
         ))
+        self.iter = 0
+        logger.info(f"initializing dino logit {name}")
+        logger.info(f"warmup temp from {warmup_temp} to {temp} for {warmup_temp_iters} iterations.")
 
-    def forward(self, tokens, epoch=0):
+    def forward(self, tokens, iter=None):
         """
         Cross-entropy between softmax outputs of the teacher and student networks.
         """
         # teacher centering and sharpening
-        temp = self.teacher_temp_schedule[epoch]
-
+        temp = self.teacher_temp_schedule[min(self.iter, len(self.teacher_temp_schedule)-1)]
         logit = (tokens - self.center) / temp
 
         if self.training:
             self.update_center(tokens)
+
+        if iter is not None:
+            self.iter += 1
 
         return logit
 

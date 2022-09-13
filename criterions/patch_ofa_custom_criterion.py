@@ -70,14 +70,14 @@ class CustomCriterionConfig(FairseqDataclass):
     out_dim: int = field(
         default=4096, metadata={"help": "output dimesion for patch-level head"}
     )
-    warmup_temp: float = field(
+    dino_warmup_temp: float = field(
         default=0.04, metadata={"help": "warmup temp"}
     )
-    temp: float = field(
+    dino_temp: float = field(
         default=0.04, metadata={"help": "temp"}
     )
-    warmup_temp_epochs: int = field(
-        default=0, metadata={"help": "warmup_temp_epochs"}
+    dino_warmup_temp_iters: int = field(
+        default=0, metadata={"help": "warmup_temp_iters"}
     )
 
 def construct_rdrop_sample(x):
@@ -172,9 +172,9 @@ class CustomCriterion(FairseqCriterion):
         num_heads=4,
         k_num=4,
         out_dim=4096,
-        warmup_temp=0.04,
-        temp=0.04,
-        warmup_temp_epochs=0
+        dino_warmup_temp=0.04,
+        dino_temp=0.04,
+        dino_warmup_temp_iters=0
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -205,24 +205,24 @@ class CustomCriterion(FairseqCriterion):
                                   out_dim=out_dim)
 
         self.img_local_logit = DINOLogit(out_dim=out_dim,
-                                         warmup_temp=warmup_temp,
-                                         warmup_temp_epochs=warmup_temp_epochs,
-                                         temp=temp,
+                                         warmup_temp=dino_warmup_temp,
+                                         warmup_temp_iters=dino_warmup_temp_iters,
+                                         temp=dino_temp,
                                          name='img_local')
         self.img_global_logit = DINOLogit(out_dim=out_dim,
-                                          warmup_temp=warmup_temp,
-                                          warmup_temp_epochs=warmup_temp_epochs,
-                                          temp=temp,
+                                          warmup_temp=dino_warmup_temp,
+                                          warmup_temp_iters=dino_warmup_temp_iters,
+                                          temp=dino_temp,
                                           name='img_global')
         self.text_local_logit = DINOLogit(out_dim=out_dim,
-                                          warmup_temp=warmup_temp,
-                                          warmup_temp_epochs=warmup_temp_epochs,
-                                          temp=temp,
+                                          warmup_temp=dino_warmup_temp,
+                                          warmup_temp_iters=dino_warmup_temp_iters,
+                                          temp=dino_temp,
                                           name='text_local')
         self.text_global_logit = DINOLogit(out_dim=out_dim,
-                                           warmup_temp=warmup_temp,
-                                           warmup_temp_epochs=warmup_temp_epochs,
-                                           temp=temp,
+                                           warmup_temp=dino_warmup_temp,
+                                           warmup_temp_iters=dino_warmup_temp_iters,
+                                           temp=dino_temp,
                                            name='text_global')
 
     def forward(self, model, sample, update_num=0, reduce=True):
