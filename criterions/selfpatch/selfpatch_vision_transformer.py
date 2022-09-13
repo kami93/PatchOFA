@@ -75,7 +75,7 @@ class Mlp(nn.Module):
         return x
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., cls_inclusive=True):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -88,15 +88,22 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
+        self.cls_inclusive = cls_inclusive
+
     
     def forward(self, x, mask=None):
         
         B, N, C = x.shape
-        q = self.q(x[:,0]).unsqueeze(1).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-        k = self.k(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-
+        q = self.q(x[:, :1]).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         q = q * self.scale
-        v = self.v(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+
+        if self.cls_inclusive:
+            x_kv = x
+        else:
+            x_kv = x[:, 1:]
+
+        k = self.k(x_kv).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        v = self.v(x_kv).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
         attn = (q @ k.transpose(-2, -1))
         if mask is not None:
@@ -116,11 +123,11 @@ class Attention(nn.Module):
 class PatchAggregation(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, Attention_block = Attention,
-                 Mlp_block=Mlp):
+                 Mlp_block=Mlp, cls_inclusive=True):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention_block(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, cls_inclusive=cls_inclusive)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -140,25 +147,27 @@ class PatchAggregation(nn.Module):
 
         return x_cls
 
-class SelfPatchHead(nn.Module):
-    def __init__(self, in_dim, num_heads, k_num):
+class PatchAggregationHead(nn.Module):
+    def __init__(self, in_dim, num_heads, use_cls=True, cosim_p=1.0):
         super().__init__()
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, in_dim))
+
+        if use_cls:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, in_dim))
+            trunc_normal_(self.cls_token, std=.02)
+        else:
+            self.cls_token = None
+
         self.cls_blocks = nn.ModuleList([
             PatchAggregation(
                 dim=in_dim, num_heads=num_heads, mlp_ratio=4.0, qkv_bias=True, qk_scale=None,
                 drop=0.0, attn_drop=0.0, drop_path=0.0, norm_layer=partial(nn.LayerNorm, eps=1e-6),
-                act_layer=nn.GELU, Attention_block=Attention,
-                Mlp_block=Mlp)
+                act_layer=nn.GELU, Attention_block=Attention, Mlp_block=Mlp, cls_inclusive=True)
             for i in range(2)])
-        trunc_normal_(self.cls_token, std=.02)
+        
         self.norm = partial(nn.LayerNorm, eps=1e-6)(in_dim)
 
         self.apply(self._init_weights)
-        self.k_num = k_num
-        # self.k_size = 3
-        # self.loc224 = self.get_local_index(196, self.k_size)
-        # self.loc96 = self.get_local_index(36, self.k_size)
+        self.cosim_p = cosim_p
         self.embed_dim = in_dim
 
     def _init_weights(self, m):
@@ -167,9 +176,10 @@ class SelfPatchHead(nn.Module):
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, img, batch_idx, patch_mask):
+    def forward(self, img, aggr_seed, batch_idx, patch_mask):
         """
         img: 'B (H W) D'
+        aggr_seed: 'L D' e.g., text embedding
         batch_idx: 'L'
         patch_mask: 'L (H W)'
         """
@@ -181,60 +191,36 @@ class SelfPatchHead(nn.Module):
         #  
         # with torch.no_grad():
         #     img_norm = nn.functional.normalize(img, dim=-1)
-        #     img_norm = img_norm[word_batch_idx]
+        #     img_norm = img_norm[batch_idx]
 
-        #     word_norm = nn.functional.normalize(word, dim=-1)
+        #     aggr_norm = nn.functional.normalize(aggr_seed, dim=-1)
 
-        #     sim_matrix = torch.einsum("ld,lpd->lp", word_norm, img_norm)
-        #     sim_matrix += word_patch_mask
+        #     sim_matrix = torch.einsum("ld,lpd->lp", aggr_norm, img_norm)
+        #     sim_matrix += patch_mask
+
+        #     import pdb; pdb.set_trace()
+
         #     _, top_idx = sim_matrix.topk(k=self.k_num, dim=-1)
             
         #     img_topk = img[word_batch_idx.unsqueeze(-1).expand(-1, self.k_num), top_idx]
-
-        #     for i, blk in enumerate(self.cls_blocks):
-        #         if i == 0:
-        #             glo_tokens = blk(img, self.cls_token.expand(bsz, -1, -1))
-        #             loc_tokens = blk(img_topk, self.cls_token.expand(wsz, -1, -1))
-        #         else:
-        #             glo_tokens = blk(img, glo_tokens)
-        #             loc_tokens = blk(img_topk, loc_tokens)
         #
         ###############################################################################
         ###############################################################################
-
-        _mask = torch.cat([torch.zeros(size=(B, HW), device=patch_mask.device), patch_mask], dim=0)
-        _mask_batch_idx = torch.cat([torch.arange(B, device=batch_idx.device), batch_idx], dim=0)
-        _img = img[_mask_batch_idx]
+        img_repeat = img[batch_idx]
         
-        tokens = None
+        if self.cls_token is not None:
+            tokens = self.cls_token.expand(L, -1, -1)
+        else:
+            tokens = aggr_seed.unsqueeze(1)
+
         for i, blk in enumerate(self.cls_blocks):
-            tokens = blk(_img,
-                         tokens if tokens is not None else self.cls_token.expand(B+L, -1, -1),
-                         mask=_mask)
+            tokens = blk(img_repeat,
+                         tokens,
+                         mask=patch_mask)
 
         tokens = tokens.squeeze(1)
 
         return tokens
-
-    # @staticmethod
-    # def get_local_index(N_patches, k_size):
-    #     loc_weight = []
-    #     w = torch.LongTensor(list(range(int(math.sqrt(N_patches)))))
-    #     for i in range(N_patches):
-    #         ix, iy = i//len(w), i%len(w)
-    #         wx = torch.zeros(int(math.sqrt(N_patches)))
-    #         wy = torch.zeros(int(math.sqrt(N_patches)))
-    #         wx[ix]=1
-    #         wy[iy]=1
-    #         for j in range(1,int(k_size//2)+1):
-    #             wx[(ix+j)%len(wx)]=1
-    #             wx[(ix-j)%len(wx)]=1
-    #             wy[(iy+j)%len(wy)]=1
-    #             wy[(iy-j)%len(wy)]=1
-    #         weight = (wy.unsqueeze(0)*wx.unsqueeze(1)).view(-1)
-    #         weight[i] = 0
-    #         loc_weight.append(weight.nonzero().squeeze())
-    #     return torch.stack(loc_weight)
 
 class DINOHead(nn.Module):
     def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048, bottleneck_dim=256):

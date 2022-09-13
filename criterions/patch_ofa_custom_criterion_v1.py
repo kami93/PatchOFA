@@ -15,7 +15,7 @@ from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.dataclass import FairseqDataclass
 from omegaconf import II
 
-from .selfpatch import SelfPatchHead, DINOHead, DINOLogit
+from .selfpatch import PatchAggregationHead, DINOHead, DINOLogit
 
 @dataclass
 class CustomCriterionV1Config(FairseqDataclass):
@@ -196,9 +196,9 @@ class CustomCriterionV1(FairseqCriterion):
             self.constraint_end = int(constraint_end)
 
 
-        self.ca_head = SelfPatchHead(in_dim=embed_dim,
-                                     num_heads=num_heads,
-                                     k_num=k_num)
+        self.ca_head = PatchAggregationHead(in_dim=embed_dim,
+                                            num_heads=num_heads,
+                                            k_num=k_num)
         self.img_head = DINOHead(in_dim=embed_dim,
                                  out_dim=out_dim)
         self.text_head = DINOHead(in_dim=embed_dim,
@@ -382,6 +382,8 @@ class CustomCriterionV1(FairseqCriterion):
         text_batch_idx = torch.cat(text_batch_idx, dim=0)
         text_patch_mask = torch.cat(text_patch_mask, dim=0)
 
+        # TODO: update handling text_batch_idx, text_patch_mask for updated 
+        # PatchAggregationHead internal forward
         img_tokens = self.ca_head(image_encoding, text_batch_idx, text_patch_mask)
 
         img_project = self.img_head(img_tokens)

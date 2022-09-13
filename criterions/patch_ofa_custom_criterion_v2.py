@@ -17,7 +17,7 @@ from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.dataclass import FairseqDataclass
 from omegaconf import II
 
-from .selfpatch import SelfPatchHead, DINOHead, DINOLogit, Mlp
+from .selfpatch import PatchAggregationHead, DINOHead, DINOLogit, Mlp
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +71,12 @@ class CustomCriterionV2Config(FairseqDataclass):
     embed_dim: int = field(
         default=256, metadata={"help": "embedding dimesion for token_head"}
     )
-    # dict_head_type: str = field(
-    #     default='copy_dictionary', metadata={"help": "layer type for token_head_type: none | linear | mlp"}
-    # )
+    patch_aggregation_type: str = field(
+        default='attention_text_token', metadata={"help": "type for patch aggregation: attention_text_token | attention_cls_token | random_sample | average | ignore"}
+    )
+    aggregation_num_heads: int = field(
+        default=4, metadata={"help": "aggregation_num_heads; reference: 4 heads for 256 dim feature"}
+    )
     # dict_dim: int = field(
     #     default=256, metadata={"help": "input dimesion for dict_head note: (59457, 256) for OFA-tiny dictionary"}
     # )
@@ -181,6 +184,8 @@ class CustomCriterionV2(FairseqCriterion):
         token_head_type='linear_copy_dictionary',
         dictionary_size=59457,
         embed_dim=256,
+        patch_aggregation_type='attention_text_token',
+        aggregation_num_heads=4
         # dict_head_type='linear',
         # dict_dim=4096,
         # out_dim=4096,
@@ -214,34 +219,30 @@ class CustomCriterionV2(FairseqCriterion):
             # self.text_head = nn.Linear(in_features=embed_dim, out_features=dictionary_size)
             self.token_head_initialized = False # lazy initialization using model embedding in the first iteration.
 
-        elif token_head_type == 'linear':
+        elif token_head_type == 'linear_random':
             self.token_head = nn.Linear(in_features=embed_dim, out_features=dictionary_size)
             self.token_head_initialized = True
             # self.img_head = nn.Linear(in_features=embed_dim, out_features=dictionary_size)
             # self.text_head = nn.Linear(in_features=embed_dim, out_features=dictionary_size)
 
         elif token_head_type == 'mlp':
-            self.img_head = Mlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size)
-            self.text_head = Mlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size)
+            self.token_head = nn.Linear(in_features=embed_dim, out_features=dictionary_size)
+            # self.img_head = Mlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size)
+            # self.text_head = Mlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size)
             self.token_head_initialized = True
         
         else:
             raise NotImplementedError(f"token_head_type {token_head_type} is not implemented.")
 
-        # if token_head_type == 'copy_dictionary':
-        #     self.dict_head = None
-
-        # elif dict_head_type == 'linear':
-        #     self.dict_head = nn.Linear(in_features=dict_dim, out_features=out_dim)
-
-        # elif dict_head_type == 'mlp':
-        #     self.dict_head = Mlp(in_features=dict_dim, hidden_features=out_dim, out_features=out_dim)
-        
-        # elif dict_head_type == 'dino_head':
-        #     self.dict_head = DINOHead(in_dim=dict_dim,
-        #                               out_dim=out_dim)
-        # else:
-        #     raise NotImplementedError(f"dict_head_type {dict_head_type} is not implemented.")
+        self.patch_aggregation_type = patch_aggregation_type
+        if patch_aggregation_type == 'attention_text_token':
+            self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=False)
+        elif patch_aggregation_type == 'attention_cls_token':
+            self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=True)
+        elif patch_aggregation_type == 'ignore':
+            self.aggregation = None
+        else:
+            raise NotImplementedError(f"patch_aggregation_type {patch_aggregation_type} is not implemented.")
 
         self.use_noun = True
         self.use_object = True
@@ -363,7 +364,7 @@ class CustomCriterionV2(FairseqCriterion):
         # TODO: detect & erase unused embedding indices?
 
         aux_input = sample.get("aux_input")
-        
+
         eos_idx = aux_input.get("eos_idx")
         noun_idx = aux_input.get("noun_idx")
         noun_batch_idx = aux_input.get("noun_batch_idx")
@@ -395,14 +396,13 @@ class CustomCriterionV2(FairseqCriterion):
             text_batch_idx.append(noun_batch_idx)
             text_patch_mask.append(noun_patch_mask)
             L += LN
-        
+
         if self.use_object and LO:
             text_idx.append(object_idx)
             text_batch_idx.append(object_batch_idx)
             text_patch_mask.append(object_patch_mask)
             L += LO
 
-        
         if L:
             text_idx = torch.cat(text_idx, dim=0)
             text_batch_idx = torch.cat(text_batch_idx, dim=0)
@@ -411,28 +411,33 @@ class CustomCriterionV2(FairseqCriterion):
             token_ids = src_tokens[text_batch_idx, text_idx]
             text_tokens = text_encoding[text_batch_idx, text_idx]
 
-            # _bool_mask = ~text_patch_mask.bool()
-            # _n_obj_patches = _bool_mask.sum(1)
-            # token_ids_all = token_ids.repeat_interleave(_n_obj_patches, dim=0)
-
-            # _patch_encoding = image_encoding[text_batch_idx]
-            # patch_encoding_all = (_patch_encoding * _bool_mask.type_as(_patch_encoding).unsqueeze(-1)).sum(1) / _n_obj_patches.unsqueeze(-1)
-            # patch_encoding_all = _patch_encoding[_bool_mask]
-
-            # img_logit = self.token_head(patch_encoding_all)
-            # img_loss = F.cross_entropy(img_logit / 0.07, token_ids, reduction='mean')
-            img_loss = torch.zeros(size=(1, ), device=encoder_out.device)
-
             text_logit = self.token_head(text_tokens)
             text_loss = F.cross_entropy(text_logit, token_ids, reduction='mean')
 
-            patch_token_size = 0.0
-            # patch_token_size = img_logit.size(0)
-        
+            patch_encoding = None
+            if self.patch_aggregation_type == 'attention_text_token':
+                patch_encoding = self.aggregation(image_encoding,
+                                                  aggr_seed=text_tokens,
+                                                  batch_idx=text_batch_idx,
+                                                  patch_mask=text_patch_mask)
+            elif self.patch_aggregation_type == 'attention_cls_token':
+                patch_encoding = self.aggregation(image_encoding,
+                                                  aggr_seed=text_tokens,
+                                                  batch_idx=text_batch_idx,
+                                                  patch_mask=text_patch_mask)
+
+            if patch_encoding is not None:
+                img_logit = self.token_head(patch_encoding)
+                img_loss = F.cross_entropy(img_logit, token_ids, reduction='mean')
+                patch_token_size = img_logit.size(0)
+            else:
+                img_loss = torch.zeros(size=(1, ), device=encoder_out.device)
+                patch_token_size = 0.0
+
         else:
-            patch_token_size = 0.0
-            img_loss = torch.zeros(size=(1, ), device=encoder_out.device)
             text_loss = torch.zeros(size=(1, ), device=encoder_out.device)
+            img_loss = torch.zeros(size=(1, ), device=encoder_out.device)
+            patch_token_size = 0.0
 
         return loss, nll_loss, img_loss, text_loss, ntokens, batch_size, patch_token_size
 
