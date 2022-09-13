@@ -18,7 +18,7 @@ from omegaconf import II
 from .selfpatch import SelfPatchHead, DINOHead, DINOLogit
 
 @dataclass
-class CustomCriterionConfig(FairseqDataclass):
+class CustomCriterionV1Config(FairseqDataclass):
     # based on AdjustLabelSmoothedCrossEntropyCriterionConfig
     label_smoothing: float = field(
         default=0.0,
@@ -150,9 +150,9 @@ def label_smoothed_nll_loss(
 
 
 @register_criterion(
-    "custom_criterion", dataclass=CustomCriterionConfig
+    "custom_criterion_v1", dataclass=CustomCriterionV1Config
 )
-class CustomCriterion(FairseqCriterion):
+class CustomCriterionV1(FairseqCriterion):
     # based on AdjustLabelSmoothedCrossEntropyCriterion
     def __init__(
         self,

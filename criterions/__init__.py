@@ -1,5 +1,7 @@
 from .scst_loss import ScstRewardCriterion
 from .label_smoothed_cross_entropy import AdjustLabelSmoothedCrossEntropyCriterion
-from . patch_ofa_custom_criterion import CustomCriterion
 from .clip_scst_loss import ClipScstRewardCriterion
 from .label_smoothed_encouraging_loss import AdjustLabelSmoothedEncouragingLossCriterion
+
+from .patch_ofa_custom_criterion_v1 import CustomCriterionV1
+from .patch_ofa_custom_criterion_v2 import CustomCriterionV2

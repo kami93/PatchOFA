@@ -948,10 +948,12 @@ class TransformerEncoder(FairseqEncoder):
         # `forward` so we use a dictionary instead.
         # TorchScript does not support mixed values so the values are all lists.
         # The empty list is equivalent to None.
+
+        encoder_embedding = self.embed_tokens.weight.clone()
         return {
             "encoder_out": [x],  # T x B x C
             "encoder_padding_mask": [encoder_padding_mask],  # B x T
-            "encoder_embedding": [],  # B x T x C
+            "encoder_embedding": [encoder_embedding],  # B x T x C
             "encoder_states": encoder_states,  # List[T x B x C]
             "src_tokens": [],
             "src_lengths": [],
