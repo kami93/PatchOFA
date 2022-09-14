@@ -17,7 +17,7 @@ from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.dataclass import FairseqDataclass
 from omegaconf import II
 
-from .selfpatch import PatchAggregationHead, DINOHead, DINOLogit, HeadMlp
+# from .selfpatch import PatchAggregationHead, DINOHead, DINOLogit, HeadMlp
 
 logger = logging.getLogger(__name__)
 

@@ -15,7 +15,7 @@ from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.dataclass import FairseqDataclass
 from omegaconf import II
 
-from .selfpatch import PatchAggregationHead, DINOHead, DINOLogit
+# from .selfpatch import PatchAggregationHead, DINOHead, DINOLogit
 
 @dataclass
 class CustomCriterionV1Config(FairseqDataclass):
