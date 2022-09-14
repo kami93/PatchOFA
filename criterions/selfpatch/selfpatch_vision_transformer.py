@@ -134,8 +134,8 @@ class Attention(nn.Module):
         if mask is not None:
             with torch.no_grad():
                 if self.cls_inclusive:
-                    mask = torch.cat([torch.zeros(size=(B, 1), device=mask.device), mask], dim=1).unsqueeze(1).unsqueeze(1)
-                attn += mask
+                    mask = torch.cat([torch.zeros(size=(B, 1), device=mask.device), mask], dim=1)
+                attn += mask.unsqueeze(1).unsqueeze(1)
 
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
