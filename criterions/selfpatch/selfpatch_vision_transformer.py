@@ -125,6 +125,7 @@ class Attention(nn.Module):
             x_kv = x
         else:
             x_kv = x[:, 1:]
+            N -= 1
 
         k = self.k(x_kv).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         v = self.v(x_kv).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
@@ -132,8 +133,9 @@ class Attention(nn.Module):
         attn = (q @ k.transpose(-2, -1))
         if mask is not None:
             with torch.no_grad():
-                mask_temp = torch.cat([torch.zeros(size=(B, 1), device=mask.device), mask], dim=1).unsqueeze(1).unsqueeze(1)
-                attn += mask_temp
+                if self.cls_inclusive:
+                    mask = torch.cat([torch.zeros(size=(B, 1), device=mask.device), mask], dim=1).unsqueeze(1).unsqueeze(1)
+                attn += mask
 
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
