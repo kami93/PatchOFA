@@ -262,11 +262,11 @@ class CustomVqaGenDataset(OFADataset):
                     box = patch_boxes.get(word)
                     box_mask = torch.full(size=(self.num_patches, self.num_patches), fill_value=float("-inf"))
                     
-                    try:
-                        box_mask[box[1]:box[3], box[0]:box[2]] = 0.0
-                    except:
-                        import pdb; pdb.set_trace()
-                        abc = 1
+                    box_mask[box[1]:max(box[1]+1, box[3]), box[0]:max(box[0]+1, box[2])] = 0.0
+                    if (box_mask == 0.0).sum() == 0:
+                        logger.info("Bug Detected")
+                        assert False
+
                     noun_patch_mask.append(box_mask.flatten())
 
         src_item.append(self.encode_text('?'))
@@ -299,11 +299,12 @@ class CustomVqaGenDataset(OFADataset):
                     box = patch_boxes.get(word)
                     box_mask = torch.full(size=(self.num_patches, self.num_patches), fill_value=float("-inf"))
                     
-                    try:
-                        box_mask[box[1]:box[3], box[0]:box[2]] = 0.0
-                    except:
-                        import pdb; pdb.set_trace()
-                        abc = 1
+                    box_mask[box[1]:max(box[1]+1, box[3]), box[0]:max(box[0]+1, box[2])] = 0.0
+                    if (box_mask == 0.0).sum() == 0:
+                        logger.info("Bug Detected")
+                        assert False
+
+
                     object_patch_mask.append(box_mask.flatten())
 
             predict_object_item = torch.cat(predict_object_item)
