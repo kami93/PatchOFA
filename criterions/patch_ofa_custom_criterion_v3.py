@@ -93,8 +93,8 @@ class CustomCriterionV3Config(FairseqDataclass):
     patch_loss_weight: float = field(
         default=1.0, metadata={"help": "patch_loss_weight."}
     )
-    patch_loss_type: float = field(
-        default=1.0, metadata={"help": "patch_loss_weight."}
+    patch_loss_type: str = field(
+        default='clsloc_clsglo_kl', metadata={"help": "patch_loss_type."}
     )
 
 def resolve_str_true_false(x):
