@@ -172,7 +172,7 @@ class PatchAggregation(nn.Module):
         return x_cls
 
 class PatchAggregationHead(nn.Module):
-    def __init__(self, in_dim, num_heads, use_cls=True, cosim_p=1.0):
+    def __init__(self, in_dim, num_heads, use_cls=True, cosim_p=1.0, cls_inclusive=True):
         super().__init__()
 
         if use_cls:
@@ -185,7 +185,7 @@ class PatchAggregationHead(nn.Module):
             PatchAggregation(
                 dim=in_dim, num_heads=num_heads, mlp_ratio=4.0, qkv_bias=True, qk_scale=None,
                 drop=0.0, attn_drop=0.0, drop_path=0.0, norm_layer=partial(nn.LayerNorm, eps=1e-6),
-                act_layer=nn.GELU, Attention_block=Attention, Mlp_block=Mlp, cls_inclusive=True)
+                act_layer=nn.GELU, Attention_block=Attention, Mlp_block=Mlp, cls_inclusive=cls_inclusive)
             for i in range(2)])
         
         self.norm = partial(nn.LayerNorm, eps=1e-6)(in_dim)
@@ -301,13 +301,15 @@ class DINOHead(nn.Module):
 class DINOLogit(nn.Module):
     def __init__(self, out_dim, warmup_temp,
                  warmup_temp_iters, temp=0.1,
-                 center_momentum=0.9, name=None):
+                 center_momentum=0.9, name=None, update_step=1):
         super().__init__()
         self.temp = temp
         self.center_momentum = center_momentum
         self.name = name or ''
+        self.update_step = update_step
         
         self.register_buffer("center", torch.zeros(1, out_dim))
+        self.register_buffer("center_temp", torch.zeros(1, out_dim))
 
         # we apply a warm up for the teacher temperature because
         # a too high temperature makes the training instable at the beginning
@@ -350,12 +352,15 @@ class DINOLogit(nn.Module):
         tokens_center = tokens_center / B
 
         # ema update
-        maybe_nan = tokens_center.isnan().any()
-        if maybe_nan:
-            logger.info(f"Skip updating {self.name} centers due to NaN")
+        # maybe_nan = tokens_center.isnan().any()
+        # if maybe_nan:
+        #     logger.info(f"Skip updating {self.name} centers due to NaN")
 
-        else:
-            self.center = self.center * self.center_momentum + tokens_center * (1 - self.center_momentum)
+        # else:
+        self.center_temp = self.center_temp + tokens_center
+        if (self.iter+1) % self.update_step == 0:
+            self.center = self.center * self.center_momentum + self.center_temp * (1 - self.center_momentum)
+            self.center_temp[:] = 0.0
 
 def is_dist_avail_and_initialized():
     if not dist.is_available():

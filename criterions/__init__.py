@@ -5,3 +5,4 @@ from .label_smoothed_encouraging_loss import AdjustLabelSmoothedEncouragingLossC
 
 from .patch_ofa_custom_criterion_v1 import CustomCriterionV1
 from .patch_ofa_custom_criterion_v2 import CustomCriterionV2
+from .patch_ofa_custom_criterion_v3 import CustomCriterionV3
