@@ -300,41 +300,38 @@ class DINOHead(nn.Module):
         x = self.last_layer(x)
         return x
 
-class DINOLogit(nn.Module):
-    def __init__(self, out_dim, warmup_temp,
-                 warmup_temp_iters, temp=0.1,
-                 center_momentum=0.9, name=None, update_step=1):
+class DINOCentering(nn.Module):
+    def __init__(self, dim, center_momentum=0.9, update_step=1):
         super().__init__()
-        self.temp = temp
         self.center_momentum = center_momentum
-        self.name = name or ''
-        self.update_step = update_step
         
-        self.register_buffer("center", torch.zeros(1, out_dim))
-        self.register_buffer("center_temp", torch.zeros(1, out_dim))
+        self.register_buffer("center", torch.zeros(1, dim))
+        self.register_buffer("center_temp", torch.zeros(1, dim))
+        self.iter = 0
+        self.update_step = update_step
 
         # we apply a warm up for the teacher temperature because
         # a too high temperature makes the training instable at the beginning
-        self.teacher_temp_schedule = np.concatenate((
-            np.linspace(warmup_temp,
-                        temp, warmup_temp_iters),
-        ))
-        self.iter = 0
-        logger.info(f"initializing dino logit {name}")
-        logger.info(f"warmup temp from {warmup_temp} to {temp} for {warmup_temp_iters} iterations.")
+        # self.teacher_temp_schedule = np.concatenate((
+        #     np.linspace(warmup_temp,
+        #                 temp, warmup_temp_iters),
+        # ))
+        # self.iter = 0
+        # logger.info(f"initializing dino logit {name}")
+        # logger.info(f"warmup temp from {warmup_temp} to {temp} for {warmup_temp_iters} iterations.")
 
     def forward(self, tokens, iter=None):
         """
         Cross-entropy between softmax outputs of the teacher and student networks.
         """
         # teacher centering and sharpening
-        temp = self.teacher_temp_schedule[min(self.iter, len(self.teacher_temp_schedule)-1)]
-        logit = (tokens - self.center) / temp
+        # temp = self.teacher_temp_schedule[min(self.iter, len(self.teacher_temp_schedule)-1)]
+        logit = (tokens - self.center) #  / temp
 
         if self.training:
             self.update_center(tokens)
 
-        if iter is not None:
+        if iter is None:
             self.iter += 1
 
         return logit

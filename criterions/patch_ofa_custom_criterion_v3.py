@@ -5,6 +5,7 @@
 
 import math
 from dataclasses import dataclass, field
+from re import X
 from typing import Optional
 import logging
 
@@ -17,7 +18,7 @@ from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.dataclass import FairseqDataclass
 from omegaconf import II
 
-from .selfpatch import PatchAggregationHead, DINOHead, DINOLogit, HeadMlp
+from .selfpatch import PatchAggregationHead, DINOHead, DINOCentering
 
 logger = logging.getLogger(__name__)
 
@@ -77,30 +78,33 @@ class CustomCriterionV3Config(FairseqDataclass):
     aggregation_cls_inclusive: str = field(
         default='false', metadata={"help": "use cls token for (k, v) in attention layers true | false"}
     )
-    no_text_loss: bool = field(
-        default=False, metadata={"help": "do not use text_loss"}
-    )
     out_dim: int = field(
-        default=4096, metadata={"help": "output dimesion for token_head and dict_head"}
+        default=59457, metadata={"help": "output dimesion for token_head and dict_head"}
     )
-    token_warmup_temp: float = field(
-        default=0.04, metadata={"help": "warmup temp"}
+    student_temp: float = field(
+        default=0.1, metadata={"help": "student_temp"}
     )
-    token_temp: float = field(
-        default=0.04, metadata={"help": "temp"}
-    )
-    token_warmup_temp_iters: int = field(
-        default=1, metadata={"help": "warmup_temp_iters"}
+    teacher_temp: float = field(
+        default=0.04, metadata={"help": "teacher_temp"}
     )
     update_step: int = field(
         default=1, metadata={"help": "update_step for dino logit; set as that equals to accumulation count"}
     )
-    use_symmetric_loss: str = field(
-        default='false', metadata={"help": "use symmetric KL for dino true | false"}
-    )
     patch_loss_weight: float = field(
         default=1.0, metadata={"help": "patch_loss_weight."}
     )
+    patch_loss_type: float = field(
+        default=1.0, metadata={"help": "patch_loss_weight."}
+    )
+
+def resolve_str_true_false(x):
+    x = x.lower()
+    if x == 'true':
+        return True
+    elif x == 'false':
+        return False
+    else:
+        raise ValueError(f"Unable to recognize string bool input: {x}")
 
 def construct_rdrop_sample(x):
     if isinstance(x, dict):
@@ -195,15 +199,16 @@ class CustomCriterionV3(FairseqCriterion):
         aggregation_num_heads=4,
         aggregation_cosim_p=1.0,
         aggregation_cls_inclusive='false',
-        out_dim=4096,
-        token_warmup_temp=0.04,
-        token_temp=0.04,
-        token_warmup_temp_iters=1,
+        out_dim=59457,
+        teacher_temp=0.04,
+        student_temp=0.1,
         update_step=1,
-        use_symmetric_loss='false',
-        patch_loss_weight=1.0
+        patch_loss_weight=1.0,
+        patch_loss_type='clsloc_clsglo_kl'
     ):
         super().__init__(task)
+
+        self.patch_loss_type = patch_loss_type
         self.sentence_avg = sentence_avg
         self.eps = label_smoothing
         self.ignore_prefix_size = ignore_prefix_size
@@ -222,12 +227,14 @@ class CustomCriterionV3(FairseqCriterion):
             self.constraint_start = int(constraint_start)
             self.constraint_end = int(constraint_end)
 
+        self.aggregation_cls_inclusive = resolve_str_true_false(aggregation_cls_inclusive)
+
         self.patch_aggregation_type = patch_aggregation_type
-        aggregation_cls_inclusive = True if aggregation_cls_inclusive == 'true' else False
+        
         if patch_aggregation_type == 'attention_text_token':
-            self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=False, cosim_p=aggregation_cosim_p, cls_inclusive=aggregation_cls_inclusive)
+            self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=False, cosim_p=aggregation_cosim_p, cls_inclusive=self.aggregation_cls_inclusive)
         elif patch_aggregation_type == 'attention_cls_token':
-            self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=True, cosim_p=aggregation_cosim_p, cls_inclusive=aggregation_cls_inclusive)
+            self.aggregation = PatchAggregationHead(embed_dim, aggregation_num_heads, use_cls=True, cosim_p=aggregation_cosim_p, cls_inclusive=self.aggregation_cls_inclusive)
         elif patch_aggregation_type in {'ignore', 'cossim_top'}:
             self.aggregation = None
         else:
@@ -236,18 +243,14 @@ class CustomCriterionV3(FairseqCriterion):
         self.use_noun = True
         self.use_object = True
 
-        self.use_symmetric_loss = use_symmetric_loss
-
         self.dino_head = DINOHead(in_dim=embed_dim,
                                   out_dim=out_dim)
 
-        self.dino_proj = DINOLogit(out_dim=out_dim,
-                                   warmup_temp=token_warmup_temp,
-                                   warmup_temp_iters=token_warmup_temp_iters,
-                                   temp=token_temp,
-                                   name='dino_proj',
-                                   update_step=update_step)
+        self.dino_centering = DINOCentering(dim=out_dim,
+                                            update_step=update_step)
         
+        self.student_temp = student_temp
+        self.teacher_temp = teacher_temp
         self.patch_loss_weight = patch_loss_weight
 
     def forward(self, model, sample, update_num=0, reduce=True):
@@ -282,19 +285,23 @@ class CustomCriterionV3(FairseqCriterion):
             construct_rdrop_sample(sample)
 
         net_output = model(**sample["net_input"]) # **sample["aux_input"]
-        loss, nll_loss, patch_loss, ntokens, batch_size = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
+        loss, nll_loss, patch_kl_loss, clsglo_loss, clsloc_loss, ntokens, batch_size = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
 
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
-        patch_loss = patch_loss * sample_size
 
+        patch_loss = patch_kl_loss + clsglo_loss + clsloc_loss
+        patch_loss = patch_loss * sample_size
         loss = loss + patch_loss * self.patch_loss_weight
 
         logging_output = {
             "loss": loss.data,
             "nll_loss": nll_loss.data,
             "patch_loss": patch_loss.data,
+            "patch_kl_loss": patch_kl_loss.data,
+            "clsglo_loss": clsglo_loss.data,
+            "clsloc_loss": clsloc_loss.data,
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size
@@ -400,46 +407,72 @@ class CustomCriterionV3(FairseqCriterion):
             text_patch_mask.append(object_patch_mask)
             L += LO
 
-        if L:
-            text_idx = torch.cat(text_idx, dim=0)
-            text_batch_idx = torch.cat(text_batch_idx, dim=0)
-            text_patch_mask = torch.cat(text_patch_mask, dim=0)
+        assert L > 0
 
-            text_tokens = text_encoding[text_batch_idx, text_idx]
+        clsglo_loss = torch.zeros(size=(1, ), device=encoder_out.device)
+        clsloc_loss = torch.zeros(size=(1, ), device=encoder_out.device)
+        patch_kl_loss = torch.zeros(size=(1, ), device=encoder_out.device)
 
-            glo_patch_mask = torch.zeros_like(text_patch_mask)
-            patch_encoding_glo = self.aggregation(image_encoding,
-                                                   aggr_seed=text_tokens,
-                                                   batch_idx=text_batch_idx,
-                                                   patch_mask=glo_patch_mask)
+        text_idx = torch.cat(text_idx, dim=0)
+        text_batch_idx = torch.cat(text_batch_idx, dim=0)
+        text_patch_mask = torch.cat(text_patch_mask, dim=0)
 
-            patch_encoding_loc = self.aggregation(image_encoding,
-                                                  aggr_seed=text_tokens,
-                                                  batch_idx=text_batch_idx,
-                                                  patch_mask=text_patch_mask)
+        text_tokens = text_encoding[text_batch_idx, text_idx]
+        word_labels = src_tokens[text_batch_idx, text_idx]
 
-            feature_glo = self.dino_head(patch_encoding_glo)
-            feature_loc = self.dino_head(patch_encoding_loc)
-                        
-            if self.use_symmetric_loss == 'true':
-                feature_total = torch.cat([feature_glo, feature_loc], dim=0)
-                teacher = self.dino_proj(feature_total).detach()
-                student = torch.cat([feature_loc, feature_glo], dim=0) / 0.1
+        patch_encoding_glo = None
+        patch_encoding_loc = None
+        
+        loss_names = self.patch_loss_type.split('_')
+        for loss_name in loss_names:
+            if loss_name == 'clsglo':
+                if patch_encoding_glo is None:
+                    patch_encoding_glo = self.aggregation(image_encoding,
+                                                            aggr_seed=text_tokens,
+                                                            batch_idx=text_batch_idx,
+                                                            patch_mask=torch.zeros_like(text_patch_mask))
+                feature_glo = self.dino_head(patch_encoding_glo)
+                clsglo_loss = F.cross_entropy(feature_glo / self.student_temp, word_labels)
 
-            elif self.use_symmetric_loss == 'false':
-                teacher = self.dino_proj(feature_loc).detach()
-                student = feature_glo / 0.1
+            elif loss_name == 'clsloc':
+                if patch_encoding_loc is None:
+                    patch_encoding_loc = self.aggregation(image_encoding,
+                                                            aggr_seed=text_tokens,
+                                                            batch_idx=text_batch_idx,
+                                                            patch_mask=text_patch_mask)
+                feature_loc = self.dino_head(patch_encoding_loc)
+                clsloc_loss = F.cross_entropy(feature_loc / self.student_temp, word_labels)
+
+            elif loss_name in {'kl', 'klsym'}:
+                if patch_encoding_glo is None:
+                    patch_encoding_glo = self.aggregation(image_encoding,
+                                                            aggr_seed=text_tokens,
+                                                            batch_idx=text_batch_idx,
+                                                            patch_mask=torch.zeros_like(text_patch_mask))
+                if patch_encoding_loc is None:
+                    patch_encoding_loc = self.aggregation(image_encoding,
+                                                            aggr_seed=text_tokens,
+                                                            batch_idx=text_batch_idx,
+                                                            patch_mask=text_patch_mask) 
+
+                feature_glo = self.dino_head(patch_encoding_glo)
+                feature_loc = self.dino_head(patch_encoding_loc)
+
+                teacher = torch.cat([feature_loc, feature_glo], dim=0) if loss_name == 'klsym' else feature_loc
+                if 'clsglo' not in loss_names and 'clsloc' not in loss_names:
+                    teacher = self.dino_centering(teacher) # Apply centering to teacher if classification is not used.
+                
+                student = torch.cat([feature_glo, feature_loc], dim=0) if loss_name == 'klsym' else feature_glo
+                
+                teacher = teacher / self.teacher_temp
+                student = student / self.student_temp
+
+                patch_kl_loss = -torch.einsum('bd,bd->b', F.softmax(teacher.detach(), dim=-1), F.log_softmax(student, dim=-1)).mean()
             
             else:
-                raise ValueError(f"use_symmetric_loss: {self.use_symmetric_loss}")
+                raise ValueError(f"loss name {loss_name} not supported.")
 
-            patch_loss = -torch.einsum('bd,bd->b', F.softmax(teacher, dim=-1), F.log_softmax(student, dim=-1))
-            patch_loss = patch_loss.mean()
-
-        else:
-            patch_loss = torch.zeros(size=(1, ), device=encoder_out.device)
-
-        return loss, nll_loss, patch_loss, ntokens, batch_size
+        return loss, nll_loss, patch_kl_loss, clsglo_loss, clsloc_loss, ntokens, batch_size
 
     def compute_accuracy(self, model, net_output, sample):
         lprobs, target = self.get_lprobs_and_target(model, net_output, sample)
@@ -458,6 +491,9 @@ class CustomCriterionV3(FairseqCriterion):
         # loss_sum_v2 = sum(log.get("loss_v2", 0) for log in logging_outputs)
         nll_loss_sum = sum(log.get("nll_loss", 0) for log in logging_outputs)
         patch_loss_sum = sum(log.get("patch_loss", 0) for log in logging_outputs)
+        patch_kl_loss_sum = sum(log.get("patch_kl_loss", 0) for log in logging_outputs)
+        clsglo_loss_sum = sum(log.get("clsglo_loss", 0) for log in logging_outputs)
+        clsloc_loss_sum = sum(log.get("clsloc_loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
@@ -472,6 +508,15 @@ class CustomCriterionV3(FairseqCriterion):
         )
         metrics.log_scalar(
             "patch_loss", patch_loss_sum / sample_size, ntokens, round=3
+        )
+        metrics.log_scalar(
+            "patch_kl_loss", patch_kl_loss_sum / sample_size, ntokens, round=3
+        )
+        metrics.log_scalar(
+            "clsglo_loss", clsglo_loss_sum / sample_size, ntokens, round=3
+        )
+        metrics.log_scalar(
+            "clsloc_loss", clsloc_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_derived(
             "ppl", lambda meters: utils.get_perplexity(meters["nll_loss"].avg)
