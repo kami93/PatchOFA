@@ -6,6 +6,7 @@
 import math
 import random
 from typing import Any, Dict, List, Optional, Tuple
+import logging
 
 import torch
 import torch.nn as nn
@@ -36,6 +37,7 @@ from .unify_transformer_layer import TransformerEncoderLayer, TransformerDecoder
 from .resnet import ResNet
 from .frozen_bn import FrozenBatchNorm2d
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_SOURCE_POSITIONS = 1024
 DEFAULT_MAX_TARGET_POSITIONS = 1024
@@ -296,7 +298,9 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--attn-scale-factor', type=float,
                             help='attention scale factor')
         parser.add_argument('--freeze-resnet', action='store_true',
-                            help='freeze resnet')
+                            help='freeze resnet (bn only)')
+        parser.add_argument('--freeze-entire-resnet', action='store_true',
+                            help='freeze resnet (all params)')
         parser.add_argument('--freeze-encoder-embedding', action='store_true',
                             help='freeze encoder token embedding')
         parser.add_argument('--freeze-decoder-embedding', action='store_true',
@@ -535,7 +539,8 @@ class TransformerEncoder(FairseqEncoder):
         if getattr(args, "sync_bn", False):
             norm_layer = BatchNorm2d
         else:
-            if getattr(args, "freeze_resnet", False):
+            if getattr(args, "freeze_resnet", False) or getattr(args, "freeze_entire_resnet", False):
+                logger.info("Freezing ResNet BN layers...")
                 norm_layer = FrozenBatchNorm2d
             else:
                 norm_layer = None
@@ -553,6 +558,12 @@ class TransformerEncoder(FairseqEncoder):
             print("load resnet {}".format(args.resnet_model_path))
             resnet_state_dict = torch.load(self.args.resnet_model_path)
             self.embed_images.load_state_dict(resnet_state_dict)
+
+        if getattr(args, "freeze_entire_resnet", False):
+            logger.info("Freezing all ResNet parameters...")
+            for param in self.embed_images.parameters():
+                param.requires_grad_(False)
+
         if getattr(args, "patch_layernorm_embedding", False):
             self.patch_layernorm_embedding = LayerNorm(embed_dim)
         else:
