@@ -210,18 +210,30 @@ class AdjustLabelSmoothedCrossEntropyCriterionMaskedOFA(FairseqCriterion):
         if original_x is not None:
             original_loss, original_nll_loss, original_ntokens = self.compute_loss(model, (original_x, original_extra), sample, update_num, reduce=reduce)
             div += 1
+        else:
+            original_loss = torch.zeros(size=(1, ), device='cuda')
+            original_nll_loss = torch.zeros(size=(1, ), device='cuda')
+            original_ntokens = torch.zeros(size=(1, ), device='cuda')
 
         if img_masked_x is not None:
             img_masked_loss, img_masked_nll_loss, img_masked_ntokens = self.compute_loss(model, (img_masked_x, img_masked_extra), sample, update_num, reduce=reduce)
             div += 1
+        else:
+            img_masked_loss = torch.zeros(size=(1, ), device='cuda')
+            img_masked_nll_loss = torch.zeros(size=(1, ), device='cuda')
+            img_masked_ntokens = torch.zeros(size=(1, ), device='cuda')
         
         if text_masked_x is not None:
             text_masked_loss, text_masked_nll_loss, text_masked_ntokens = self.compute_loss(model, (text_masked_x, text_masked_extra), sample, update_num, reduce=reduce)
             div += 1
+        else:
+            text_masked_loss = torch.zeros(size=(1, ), device='cuda')
+            text_masked_nll_loss = torch.zeros(size=(1, ), device='cuda')
+            text_masked_ntokens = torch.zeros(size=(1, ), device='cuda')
 
         loss = (original_loss + img_masked_loss + text_masked_loss) / div
         nll_loss = (original_nll_loss + img_masked_nll_loss + text_masked_nll_loss) / div
-        ntokens = original_ntokens
+        ntokens = (original_ntokens + img_masked_ntokens + text_masked_ntokens) / div
 
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
