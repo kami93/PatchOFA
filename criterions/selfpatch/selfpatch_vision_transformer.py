@@ -56,27 +56,29 @@ class DropPath(nn.Module):
         return drop_path(x, self.drop_prob, self.training)
 
 class HeadMlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., nlayers=3):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
 
-        self.fc1 = nn.Linear(in_features, hidden_features)
-        self.fc2 = nn.Linear(hidden_features, hidden_features)
-        self.fc3 = nn.Linear(hidden_features, out_features)
-
+        self.nlayers = nlayers
+        
+        if nlayers >= 2:
+            layers = [nn.Linear(in_features, hidden_features)]
+            for _ in range(nlayers-2):
+                layers.append(nn.Linear(hidden_features, hidden_features))
+            layers.append(nn.Linear(hidden_features, out_features))
+        else:
+            layers = [nn.Linear(in_features, out_features)]
+        self.layers = nn.ModuleList(layers)
         self.drop = nn.Dropout(drop)
-
         self.act = act_layer()
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc3(x)
+        for idx, layer in enumerate(self.layers):
+            x = layer(x)
+            x = self.act(x) if idx < len(self.layers)-1 else x
+            x = self.drop(x) if idx < len(self.layers)-1 else x
 
         return x
 

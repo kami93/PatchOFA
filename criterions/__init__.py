@@ -8,3 +8,4 @@ from .label_smoothed_cross_entropy_for_masked_ofa import AdjustLabelSmoothedCros
 # from .patch_ofa_custom_criterion_v1 import CustomCriterionV1
 # from .patch_ofa_custom_criterion_v2 import CustomCriterionV2
 from .patch_ofa_custom_criterion_v3 import CustomCriterionV3
+from .patch_ofa_custom_criterion_v4 import CustomCriterionV4
