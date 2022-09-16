@@ -63,13 +63,13 @@ class HeadMlp(nn.Module):
 
         self.nlayers = nlayers
         
-        if nlayers >= 2:
-            layers = [nn.Linear(in_features, hidden_features)]
-            for _ in range(nlayers-2):
-                layers.append(nn.Linear(hidden_features, hidden_features))
-            layers.append(nn.Linear(hidden_features, out_features))
-        else:
-            layers = [nn.Linear(in_features, out_features)]
+        layers = []
+        out_dims = [hidden_features for _ in range(nlayers - 1)] + [out_features]
+        prev_dim = in_features
+        for out_dim in out_dims:
+            layers.append(nn.Linear(prev_dim, out_dim))
+            prev_dim = out_dim
+
         self.layers = nn.ModuleList(layers)
         self.drop = nn.Dropout(drop)
         self.act = act_layer()
