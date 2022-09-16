@@ -212,13 +212,13 @@ class CustomCriterionV4(FairseqCriterion):
         2) the sample size, which is used as the denominator for the gradient
         3) logging outputs to display while training
         """
-        if self.token_head_type == {'dict', 'freeze'} and not self.token_head_initialized:
+        if self.token_head_type in {'dict', 'freeze'} and not self.token_head_initialized:
             self.token_head.layers[-1].weight.data.copy_(model.encoder.embed_tokens.weight.clone())
             self.token_head_initialized = True
             if self.token_head_type == 'freeze':
                 for param in self.token_head.layers[-1].parameters():
                     param.requires_grad_(False)
-            logger.info("lazy initlaized token_head using model embeddings.")
+            logger.info("lazy initializing token_head using model embeddings.")
 
         if isinstance(sample, list):
             if self.sample_patch_num > 0:
