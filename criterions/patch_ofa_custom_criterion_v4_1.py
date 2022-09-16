@@ -388,7 +388,6 @@ class CustomCriterionV4_1(FairseqCriterion):
         labled_loss = F.cross_entropy(text_logit, word_tokens_id.detach(), reduction='mean')
 
         if self.loss_type == 'cross_entropy':
-            logger.info("cross_entropy")
             with torch.no_grad():
                 v_word_pred = F.softmax(v_word_logit / self.temperature, dim=-1)
                 pred_max = v_word_pred.max(1)
@@ -398,7 +397,6 @@ class CustomCriterionV4_1(FairseqCriterion):
             unlabled_loss = (F.cross_entropy(v_word_logit, targets_pseudo.detach(), reduction='none') * mask).mean()
         
         elif self.loss_type == 'kld':
-            logger.info("kld")
             with torch.no_grad():
                 v_word_pred = F.softmax(v_word_logit / self.temperature, dim=-1)
                 pred_max = v_word_pred.max(1)
