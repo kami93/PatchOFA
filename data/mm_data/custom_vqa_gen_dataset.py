@@ -93,12 +93,14 @@ def collate(samples, pad_idx, eos_idx):
     for batch_idx, s in enumerate(samples):
         if s['noun_idx'] is not None:
             noun_idx_all.append(s['noun_idx'])
-            noun_patch_mask_all.append(s['noun_patch_mask'])
             noun_batch_idx_all.append(s['noun_batch_idx']+batch_idx)
     
+        if s['noun_patch_mask'] is not None:
+            noun_patch_mask_all.append(s['noun_patch_mask'])
+
     if len(noun_idx_all):
         noun_idx_all = torch.cat(noun_idx_all)
-        noun_patch_mask_all = torch.cat(noun_patch_mask_all)
+        noun_patch_mask_all = torch.cat(noun_patch_mask_all) if len(noun_patch_mask_all) else None
         noun_batch_idx_all = torch.cat(noun_batch_idx_all)
     else:
         noun_idx_all = None
@@ -111,12 +113,15 @@ def collate(samples, pad_idx, eos_idx):
     for batch_idx, s in enumerate(samples):
         if s['object_idx'] is not None:
             object_idx_all.append(s['object_idx'])
-            object_patch_mask_all.append(s['object_patch_mask'])
             object_batch_idx_all.append(s['object_batch_idx']+batch_idx)
+
+        if s['object_patch_mask'] is not None:
+            object_patch_mask_all.append(s['object_patch_mask'])
+            
     
     if len(object_idx_all):
         object_idx_all = torch.cat(object_idx_all)
-        object_patch_mask_all = torch.cat(object_patch_mask_all)
+        object_patch_mask_all = torch.cat(object_patch_mask_all) if len(object_patch_mask_all) else None
         object_batch_idx_all = torch.cat(object_batch_idx_all)
     else:
         object_idx_all = None
@@ -125,6 +130,10 @@ def collate(samples, pad_idx, eos_idx):
 
     raw_information = [s['raw_information'] for s in samples]
     boxes = [s['boxes'] for s in samples]
+
+    teacher_logit = None
+    if samples[0].get("teacher_logit", None) is not None:
+        teacher_logit = torch.stack([s['teacher_logit'] for s in samples])
 
     batch = {
         "id": id,
@@ -144,7 +153,8 @@ def collate(samples, pad_idx, eos_idx):
             "noun_patch_mask": noun_patch_mask_all,
             "object_idx": object_idx_all,
             "object_batch_idx": object_batch_idx_all,
-            "object_patch_mask": object_patch_mask_all
+            "object_patch_mask": object_patch_mask_all,
+            "teacher_logit": teacher_logit
         },
         "conf": conf,
         "ref_dict": ref_dict,
@@ -153,7 +163,7 @@ def collate(samples, pad_idx, eos_idx):
         "target": target,
         "prefix_tokens": prefix_tokens,
         "raw_information": raw_information,
-        "boxes": boxes
+        "boxes": boxes,
     }
 
     return batch
@@ -177,6 +187,7 @@ class CustomVqaGenDataset(OFADataset):
         imagenet_default_mean_and_std=False,
         prompt_type="none",
         box_dir=None,
+        teacher_dir=None,
     ):
         super().__init__(split, dataset, bpe, src_dict, tgt_dict)
         self.max_src_length = max_src_length
@@ -189,9 +200,14 @@ class CustomVqaGenDataset(OFADataset):
         self.add_object = add_object
         self.constraint_trie = constraint_trie
         self.prompt_type = prompt_type
+
         self.box_dir = box_dir
         if self.box_dir is not None and not osp.exists(self.box_dir):
             raise ValueError(f"box_dir not exists: {box_dir}")
+
+        self.teacher_dir = teacher_dir
+        if self.teacher_dir is not None and not osp.exists(self.teacher_dir):
+            raise ValueError(f"teacher_dir not exists: {self.teacher_dir}")
 
         if imagenet_default_mean_and_std:
             mean = IMAGENET_DEFAULT_MEAN
@@ -224,7 +240,7 @@ class CustomVqaGenDataset(OFADataset):
         patch_image = self.patch_resize_transform(image)
 
         boxes = None
-        if line_id is not None:
+        if line_id is not None and self.box_dir is not None:
             boxes_file = osp.join(self.box_dir, self.split, f'{line_id}.pkl')
             with open(boxes_file, "rb") as f:
                 boxes = pkl.load(f)
@@ -239,6 +255,15 @@ class CustomVqaGenDataset(OFADataset):
                 patch_boxes[name] = (new_box/self.patch_size).astype(np.int)
 
             boxes = new_boxes
+
+        teacher_logit = None
+        if line_id is not None and self.teacher_dir is not None:
+            teacher_file = osp.join(self.teacher_dir, self.split, f'{line_id}.pkl')
+            with open(teacher_file, "rb") as f:
+                teacher_logit = pkl.load(f)
+            
+            teacher_logit = torch.from_numpy(teacher_logit)
+
 
         patch_mask = torch.tensor([True])
 
@@ -357,13 +382,14 @@ class CustomVqaGenDataset(OFADataset):
             "ref_dict": ref_dict,
             "conf": conf,
             "noun_idx": noun_idx if len(noun_idx) else None,
-            "noun_patch_mask": torch.stack(noun_patch_mask) if boxes is not None and len(noun_idx) else None,
+            "noun_patch_mask": torch.stack(noun_patch_mask) if len(noun_patch_mask) else None,
             "noun_batch_idx": torch.zeros_like(noun_idx) if len(noun_idx) else None,
             "object_idx": object_idx if len(object_idx) else None,
-            "object_patch_mask": torch.stack(object_patch_mask) if boxes is not None and len(object_idx) else None,
+            "object_patch_mask": torch.stack(object_patch_mask) if len(object_patch_mask) else None,
             "object_batch_idx": torch.zeros_like(object_idx) if len(object_idx) else None,
             "raw_information": raw_information,
-            "boxes": boxes
+            "boxes": boxes,
+            "teacher_logit": teacher_logit
         }
         if self.constraint_trie is not None:
             # NLP 에서 같이 나오면 안되는 단어들에 대한 트리를 쓰는 알고리즘.

@@ -57,7 +57,11 @@ class CustomVqaGenConfig(OFAConfig):
     )
     box_dir: Optional[str] = field(
         default=None,
-        metadata={"help": "path to load refvqa box directory"},
+        metadata={"help": "directory path to load refvqa box"},
+    )
+    teacher_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "directory path to load teacher logit"},
     )
     add_object: bool = field(
         default=False,
@@ -131,7 +135,8 @@ class CustomVqaGenTask(OFATask):
             constraint_trie=self.constraint_trie,
             imagenet_default_mean_and_std=self.cfg.imagenet_default_mean_and_std,
             prompt_type=self.cfg.prompt_type,
-            box_dir=self.cfg.box_dir
+            box_dir=self.cfg.box_dir,
+            teacher_dir=self.cfg.teacher_dir
         )
 
     def build_model(self, cfg):
