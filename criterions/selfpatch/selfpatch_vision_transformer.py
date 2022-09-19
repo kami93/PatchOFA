@@ -350,7 +350,7 @@ class DINOCentering(nn.Module):
             self.center_accumulation[:] = 0.0
             self.center_batch_size[:] = 0.0
 
-            logger.info(f"current_center_mean: {self.center.abs().mean().item()}")
+            # logger.info(f"current_center_mean: {self.center.abs().mean().item()}")
 
 def is_dist_avail_and_initialized():
     if not dist.is_available():
