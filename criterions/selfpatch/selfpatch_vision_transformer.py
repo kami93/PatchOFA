@@ -307,28 +307,17 @@ class DINOCentering(nn.Module):
         super().__init__()
         self.center_momentum = center_momentum
         
-        self.register_buffer("center", torch.zeros(1, dim))
-        self.register_buffer("center_temp", torch.zeros(1, dim))
+        self.register_buffer("center", torch.zeros(size=(1, dim)))
+        self.register_buffer("center_accumulation", torch.zeros(size=(1, dim)), persistent=False) # tmp buffer for accumulated updates.
+        self.register_buffer("center_batch_size", torch.zeros(size=(1, )), persistent=False) # tmp buffer for accumulated updates.
         self.iter = 0
         self.update_step = update_step
-
-        # we apply a warm up for the teacher temperature because
-        # a too high temperature makes the training instable at the beginning
-        # self.teacher_temp_schedule = np.concatenate((
-        #     np.linspace(warmup_temp,
-        #                 temp, warmup_temp_iters),
-        # ))
-        # self.iter = 0
-        # logger.info(f"initializing dino logit {name}")
-        # logger.info(f"warmup temp from {warmup_temp} to {temp} for {warmup_temp_iters} iterations.")
 
     def forward(self, tokens, iter=None):
         """
         Cross-entropy between softmax outputs of the teacher and student networks.
         """
-        # teacher centering and sharpening
-        # temp = self.teacher_temp_schedule[min(self.iter, len(self.teacher_temp_schedule)-1)]
-        logit = (tokens - self.center) #  / temp
+        logit = (tokens - self.center)
 
         if self.training:
             self.update_center(tokens)
@@ -343,25 +332,25 @@ class DINOCentering(nn.Module):
         """
         Update centers
         """
-        B = torch.tensor([tokens.size(0)], device=tokens.device)
+        B = torch.tensor([tokens.size(0)], device=tokens.device, dtype=torch.float)
 
-        tokens_center = torch.sum(tokens, dim=0, keepdim=True)
+        tokens_center = torch.sum(tokens.float(), dim=0, keepdim=True)
         if is_dist_avail_and_initialized() and get_world_size() > 1:
             dist.all_reduce(tokens_center)
             dist.all_reduce(B)
 
-        tokens_center = tokens_center / B
+        self.center_accumulation = self.center_accumulation + tokens_center
+        self.center_batch_size = self.center_batch_size + B
 
-        # ema update
-        # maybe_nan = tokens_center.isnan().any()
-        # if maybe_nan:
-        #     logger.info(f"Skip updating {self.name} centers due to NaN")
-
-        # else:
-        self.center_temp = self.center_temp + tokens_center
         if (self.iter+1) % self.update_step == 0:
-            self.center = self.center * self.center_momentum + self.center_temp * (1 - self.center_momentum)
-            self.center_temp[:] = 0.0
+            new_center = self.center_accumulation / self.center_batch_size
+
+            self.center = self.center * self.center_momentum + new_center.type_as(self.center) * (1 - self.center_momentum)
+            
+            self.center_accumulation[:] = 0.0
+            self.center_batch_size[:] = 0.0
+
+            logger.info(f"current_center_mean: {self.center.abs().mean().item()}")
 
 def is_dist_avail_and_initialized():
     if not dist.is_available():

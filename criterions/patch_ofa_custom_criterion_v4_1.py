@@ -18,7 +18,7 @@ from fairseq.dataclass import FairseqDataclass
 from fairseq.modules import LayerNorm
 from omegaconf import II
 
-from .selfpatch import HeadMlp
+from .selfpatch import HeadMlp, DINOCentering
 
 logger = logging.getLogger(__name__)
 
@@ -87,12 +87,30 @@ class CustomCriterionV4_1Config(FairseqDataclass):
     loss_type: str = field(
         default='cross_entropy', metadata={"help": "cross_entropy | kld"}
     )
-    temperature: float = field(
-        default=0.1, metadata={"help": "temperature for kld loss"}
+    teacher_temperature: float = field(
+        default=0.1, metadata={"help": "teacher temperature for loss"}
+    )
+    student_temperature: float = field(
+        default=0.1, metadata={"help": "teacher temperature for loss"}
+    )
+    use_centering: str = field(
+        default='true', metadata={"help": "whether to apply logit centering"}
+    )
+    centering_update_freq: int = field(
+        default=1, metadata={"help": "update frequency for logit center."}
     )
     alpha: float = field(
         default=0.5, metadata={"help": "alpha weight"}
     )
+
+def resolve_str_true_false(x):
+    x = x.lower()
+    if x == 'true':
+        return True
+    elif x == 'false':
+        return False
+    else:
+        raise ValueError(f"Unable to recognize string bool input: {x}")
 
 def construct_rdrop_sample(x):
     if isinstance(x, dict):
@@ -190,7 +208,10 @@ class CustomCriterionV4_1(FairseqCriterion):
         unlabeled_threshold=0.0,
         loss_type='cross_entropy', # cross_entropy | kld
         loss_weight=1.0,
-        temperature=0.1,
+        teacher_temperature=0.1,
+        student_temperature=0.1,
+        use_centering='false',
+        centering_update_freq=1,
         alpha=0.5,
         
     ):
@@ -219,27 +240,27 @@ class CustomCriterionV4_1(FairseqCriterion):
 
         self.loss_type = loss_type
         self.unlabeled_threshold = unlabeled_threshold
-        self.temperature = temperature
+        self.teacher_temperature = teacher_temperature
+        self.student_temperature = student_temperature
+
         self.alpha = alpha
-
-        # self.token_ln_teacher = LayerNorm(embed_dim)
-        # self.token_head_teacher = HeadMlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size, nlayers=self.token_head_depth)
-
-        # for param in self.token_ln_teacher.parameters():
-        #     param.requires_grad_(False)
-        # for param in self.token_head_teacher.parameters():
-        #     param.requires_grad_(False)
 
         self.token_ln = LayerNorm(embed_dim)
         self.token_head = HeadMlp(in_features=embed_dim, hidden_features=embed_dim, out_features=dictionary_size, nlayers=self.token_head_depth, drop=self.token_head_dropout)
         self.token_head_initialized = False if token_head_type in {'dict', 'freeze'} else True
+
+        if resolve_str_true_false(use_centering):
+            self.centering = DINOCentering(dictionary_size, update_step=centering_update_freq)
+        else:
+            self.centering = nn.Identity()
 
         self.loss_weight = loss_weight
 
         logger.info("Semi supervised learning information: ")
         logger.info(f"Loss type: {loss_type}")
         logger.info(f"Threshold: {unlabeled_threshold}")
-        logger.info(f"Temperature: {temperature}")
+        logger.info(f"Teacher Temperature: {teacher_temperature}")
+        logger.info(f"Studnet Temperature: {student_temperature}")
         logger.info(f"Alpha: {alpha}")
 
     def forward(self, model, sample, update_num=0, reduce=True):
@@ -380,33 +401,28 @@ class CustomCriterionV4_1(FairseqCriterion):
         word_encoding = text_encoding[mask]
 
         text_logit = self.token_head(self.token_ln(word_encoding))
-        
-        img_encoding = encoder_out[:900]
-        v_word_encoding = img_encoding.transpose(0, 1).reshape(B*900, -1)
-        v_word_logit = self.token_head(self.token_ln(v_word_encoding))
-
         labled_loss = F.cross_entropy(text_logit, word_tokens_id.detach(), reduction='mean')
 
-        if self.loss_type == 'cross_entropy':
-            with torch.no_grad():
-                v_word_pred = F.softmax(v_word_logit / self.temperature, dim=-1)
-                pred_max = v_word_pred.max(1)
-                mask = (pred_max[0] >= self.unlabeled_threshold)
-                targets_pseudo = pred_max[1]
+        img_encoding = encoder_out[:900]
+        v_word_encoding = img_encoding.transpose(0, 1).reshape(B*900, -1)
+        v_word_logit = self.centering(self.token_head(self.token_ln(v_word_encoding)))
 
-            unlabled_loss = (F.cross_entropy(v_word_logit, targets_pseudo.detach(), reduction='none') * mask).mean()
-        
+        student_logit = v_word_logit / self.student_temperature
+        with torch.no_grad():
+            teacher_logit = v_word_logit / self.teacher_temperature
+            v_word_pred = F.softmax(teacher_logit, dim=-1)
+            max_value, max_index = v_word_pred.max(1)
+            mask = (max_value >= self.unlabeled_threshold)
+
+        if self.loss_type == 'cross_entropy':
+            target = max_index.detach()
         elif self.loss_type == 'kld':
-            with torch.no_grad():
-                v_word_pred = F.softmax(v_word_logit / self.temperature, dim=-1)
-                pred_max = v_word_pred.max(1)
-                mask = (pred_max[0] >= self.unlabeled_threshold)
-                targets_pseudo = pred_max[1]
-            unlabled_loss = -torch.mean(torch.sum(F.log_softmax(v_word_logit / self.temperature, dim=1) * v_word_pred.detach() , dim=1) * mask)
-        
+            target = v_word_pred.detach()
         else:
             raise NotImplementedError("")
 
+        unlabled_loss = (F.cross_entropy(student_logit, target, reduction='none') * mask).mean()
+        
         return loss, nll_loss, labled_loss, unlabled_loss, ntokens, batch_size
 
     def compute_accuracy(self, model, net_output, sample):

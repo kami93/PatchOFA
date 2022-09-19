@@ -274,6 +274,7 @@ class CustomVqaGenDataset(OFADataset):
         src_item = []
         noun_idx = []
         noun_patch_mask = []
+        noun_list = []
         idx = 0
         pos_tag = nltk.pos_tag(question[:-1].split())
         for word, tag in pos_tag:
@@ -282,7 +283,7 @@ class CustomVqaGenDataset(OFADataset):
             idx += len(tokens)
             if tag in {'NN', 'NNS', 'NNPS', 'NNP'}:
                 noun_idx.append(idx-1)
-
+                noun_list.append(word)
                 if boxes is not None:
                     box = patch_boxes.get(word)
                     box_mask = torch.full(size=(self.num_patches, self.num_patches), fill_value=float("-inf"))
@@ -368,7 +369,11 @@ class CustomVqaGenDataset(OFADataset):
             "question": question,
             "object": "object: {}".format(predict_object_seq),
             "answer": answer,
-            "uniq_id": uniq_id
+            "uniq_id": uniq_id,
+            "line_id": line_id,
+            "object_list": predict_object_seq.split(),
+            "noun_list": noun_list
+
         }
 
         example = {
