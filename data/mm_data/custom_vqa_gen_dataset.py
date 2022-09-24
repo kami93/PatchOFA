@@ -49,6 +49,9 @@ def collate(samples, pad_idx, eos_idx):
     src_tokens = merge("source")
     src_lengths = torch.LongTensor([s["source"].ne(pad_idx).long().sum() for s in samples])
 
+    full_tokens = merge("full_item")
+    full_lengths = torch.LongTensor([s["full_item"].ne(pad_idx).long().sum() for s in samples])
+
     patch_images = torch.stack([sample['patch_image'] for sample in samples], dim=0)
     patch_masks = torch.cat([sample['patch_mask'] for sample in samples])
 
@@ -134,7 +137,6 @@ def collate(samples, pad_idx, eos_idx):
     teacher_logit = None
     if samples[0].get("teacher_logit", None) is not None:
         teacher_logit = torch.stack([s['teacher_logit'] for s in samples])
-
     batch = {
         "id": id,
         "nsentences": len(samples),
@@ -146,15 +148,21 @@ def collate(samples, pad_idx, eos_idx):
             "patch_masks": patch_masks,
             "prev_output_tokens": prev_output_tokens,
         },
+        # "aux_input": {
+        #     "eos_idx": src_lengths - 1,
+        #     "noun_idx": noun_idx_all,
+        #     "noun_batch_idx": noun_batch_idx_all,
+        #     "noun_patch_mask": noun_patch_mask_all,
+        #     "object_idx": object_idx_all,
+        #     "object_batch_idx": object_batch_idx_all,
+        #     "object_patch_mask": object_patch_mask_all,
+        #     "teacher_logit": teacher_logit
+        # },
         "aux_input": {
-            "eos_idx": src_lengths - 1,
-            "noun_idx": noun_idx_all,
-            "noun_batch_idx": noun_batch_idx_all,
-            "noun_patch_mask": noun_patch_mask_all,
-            "object_idx": object_idx_all,
-            "object_batch_idx": object_batch_idx_all,
-            "object_patch_mask": object_patch_mask_all,
-            "teacher_logit": teacher_logit
+            "src_tokens": full_tokens,
+            "src_lengths": full_lengths,
+            "patch_images": patch_images,
+            "patch_masks": patch_masks,
         },
         "conf": conf,
         "ref_dict": ref_dict,
@@ -341,6 +349,8 @@ class CustomVqaGenDataset(OFADataset):
 
             src_item = torch.cat([src_item, predict_object_item])
 
+        
+        full_item = torch.cat([self.bos_item, src_item, tgt_item, self.eos_item])
         src_item = torch.cat([self.bos_item, src_item, self.eos_item])
 
         # account for self.bos_item
@@ -382,6 +392,7 @@ class CustomVqaGenDataset(OFADataset):
             "patch_image": patch_image,
             "patch_mask": patch_mask,
             "target": target_item,
+            "full_item": full_item,
             "prev_output_tokens": prev_output_item,
             "decoder_prompt": decoder_prompt,
             "ref_dict": ref_dict,

@@ -70,7 +70,7 @@ class PatchOFAModel(TransformerModel):
         self,
         src_tokens,
         src_lengths,
-        prev_output_tokens,
+        prev_output_tokens: Optional[torch.Tensor] = None,
         patch_images: Optional[torch.Tensor] = None,
         patch_images_2: Optional[torch.Tensor] = None,
         patch_masks: Optional[torch.Tensor] = None,
@@ -82,6 +82,7 @@ class PatchOFAModel(TransformerModel):
         return_all_hiddens: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
+        encoder_only: bool = False,
     ):
         if classification_head_name is not None:
             features_only = True
@@ -96,6 +97,10 @@ class PatchOFAModel(TransformerModel):
             return_all_hiddens=return_all_hiddens,
             sample_patch_num=sample_patch_num
         )
+        
+        if encoder_only:
+            return encoder_out
+        
         x, extra = self.decoder(
             prev_output_tokens,
             code_masks=code_masks,
