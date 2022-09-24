@@ -1,4 +1,5 @@
 from .caption import CaptionTask
+from .custom_caption import CustomCaptionTask
 from .image_gen import ImageGenTask
 from .refcoco import RefcocoTask
 from .snli_ve import SnliVeTask
