@@ -427,7 +427,7 @@ class CustomCriterionV4_3(FairseqCriterion):
                 v_word_logit = rearrange(v_word_logit, '(b h w) d -> (b d) () h w', b=B, h=30, w=30)
                 v_word_logit = F.conv2d(v_word_logit, self.self_patch_weight, padding='same')
                 v_word_logit = v_word_logit / self.self_patch_sum_weight                
-                v_word_logit = rearrange(v_word_logit, '(b d) () h w -> b (h w) d', b=B, d=D)
+                v_word_logit = rearrange(v_word_logit, '(b d) () h w -> (b h w) d', b=B, d=D)
 
             if self.center_type == 'sentence':
                 teacher_logit = (v_word_logit.reshape(B, 900, -1) - sentence_center.detach()) / self.teacher_temperature
