@@ -317,7 +317,8 @@ class DINOCentering(nn.Module):
         """
         Cross-entropy between softmax outputs of the teacher and student networks.
         """
-        logit = (tokens - self.center)
+        # logit = (tokens - self.center)
+        logit = tokens
 
         if self.training:
             self.update_center(tokens)

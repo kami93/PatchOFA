@@ -102,6 +102,10 @@ class CustomCriterionV4_1Config(FairseqDataclass):
     alpha: float = field(
         default=0.5, metadata={"help": "alpha weight"}
     )
+    center_type: str = field(
+        default='image', metadata={"help": "image | text | sentence"}
+    )
+
 
 def resolve_str_true_false(x):
     x = x.lower()
@@ -213,7 +217,7 @@ class CustomCriterionV4_1(FairseqCriterion):
         use_centering='false',
         centering_update_freq=1,
         alpha=0.5,
-        
+        center_type='image',
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -242,6 +246,7 @@ class CustomCriterionV4_1(FairseqCriterion):
         self.unlabeled_threshold = unlabeled_threshold
         self.teacher_temperature = teacher_temperature
         self.student_temperature = student_temperature
+        self.center_type = center_type
 
         self.alpha = alpha
 
@@ -398,18 +403,33 @@ class CustomCriterionV4_1(FairseqCriterion):
         text_encoding = encoder_out[900:] # 'T B D'
         text_encoding = text_encoding.transpose(0, 1)
 
-        word_encoding = text_encoding[mask]
-
-        text_logit = self.token_head(self.token_ln(word_encoding))
+        if self.center_type == 'sentence':
+            text_logit = self.token_head(self.token_ln(text_encoding))
+            text_logit[~mask] = 0.0
+            sentence_center = text_logit.sum(1, keepdim=True) / mask.sum(1, keepdim=True).unsqueeze(-1)
+            text_logit = text_logit[mask]
+        elif self.center_type == 'text':
+            word_encoding = text_encoding[mask]
+            text_logit = self.centering(self.token_head(self.token_ln(word_encoding)))
+        else:
+            word_encoding = text_encoding[mask]
+            text_logit = self.token_head(self.token_ln(word_encoding))
         labled_loss = F.cross_entropy(text_logit, word_tokens_id.detach(), reduction='mean')
 
         img_encoding = encoder_out[:900]
         v_word_encoding = img_encoding.transpose(0, 1).reshape(B*900, -1)
-        v_word_logit = self.centering(self.token_head(self.token_ln(v_word_encoding)))
+        if self.center_type == 'image':
+            v_word_logit = self.centering(self.token_head(self.token_ln(v_word_encoding)))
+        else:
+            v_word_logit = self.token_head(self.token_ln(v_word_encoding))
 
         student_logit = v_word_logit / self.student_temperature
         with torch.no_grad():
-            teacher_logit = v_word_logit / self.teacher_temperature
+            if self.center_type == 'sentence':
+                teacher_logit = (v_word_logit.reshape(B, 900, -1) - sentence_center.detach()) / self.teacher_temperature
+                teacher_logit = teacher_logit.reshape(B*900, -1)
+            else:
+                teacher_logit = (v_word_logit - self.centering.center) / self.teacher_temperature
             v_word_pred = F.softmax(teacher_logit, dim=-1)
             max_value, max_index = v_word_pred.max(1)
             mask = (max_value >= self.unlabeled_threshold)
