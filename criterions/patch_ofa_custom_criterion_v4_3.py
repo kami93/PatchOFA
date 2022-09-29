@@ -110,7 +110,9 @@ class CustomCriterionV4_3Config(FairseqDataclass):
     use_self_patch: str = field(
         default='false', metadata={"help": "true | false"}
     )
-
+    use_full_text: str = field(
+        default='false', metadata={"help": "true | false"}
+    )
 
 def resolve_str_true_false(x):
     x = x.lower()
@@ -224,6 +226,7 @@ class CustomCriterionV4_3(FairseqCriterion):
         alpha=0.5,
         center_type='image',
         use_self_patch='false',
+        use_full_text='false'
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -265,6 +268,8 @@ class CustomCriterionV4_3(FairseqCriterion):
         else:
             self.centering = nn.Identity()
             
+
+        self.use_full_text = resolve_str_true_false(use_full_text)
         self.use_self_patch = resolve_str_true_false(use_self_patch)
 
         self.loss_weight = loss_weight
@@ -323,9 +328,19 @@ class CustomCriterionV4_3(FairseqCriterion):
         if self.use_rdrop:
             construct_rdrop_sample(sample)
 
-        qa_output = model(**sample["aux_input"], encoder_only=True)
         net_output = model(**sample["net_input"])
-        labeled_loss, unlabeled_loss, batch_size = self.compute_semi(model, qa_output, sample, update_num, reduce=reduce)
+
+        if self.use_full_text:
+            encoder_returns = model(**sample["aux_input"], encoder_only=True)
+            input = sample.get("aux_input")
+            src_token_id = input.get("src_tokens")
+        else:
+            extra = net_output[1]
+            encoder_returns = extra.pop("encoder_returns")
+            input = sample.get("net_input")
+            src_token_id = input.get("src_tokens")
+
+        labeled_loss, unlabeled_loss, batch_size = self.compute_semi(encoder_returns, src_token_id, reduce=reduce)
         loss, nll_loss, ntokens = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
 
         sample_size = (
@@ -381,15 +396,11 @@ class CustomCriterionV4_3(FairseqCriterion):
             constraint_masks = constraint_masks.view(-1, constraint_masks.size(-1))
         return lprobs.view(-1, lprobs.size(-1)), target.view(-1), constraint_masks
 
-    def compute_semi(self, model, qa_output, sample, update_num, reduce=True):
+    def compute_semi(self, encoder_returns, src_token_id, reduce=True):
 
-        encoder_returns = qa_output        
         encoder_out = encoder_returns["encoder_out"][0]
         encoder_embedding = encoder_returns["encoder_embedding"][0]
         # TODO: detect & erase unused embedding indices?
-
-        net_input = sample.get("aux_input")
-        src_token_id = net_input.get("src_tokens")
 
         mask = src_token_id > 2
         word_tokens_id = src_token_id[mask]
