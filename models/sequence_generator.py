@@ -24,7 +24,7 @@ class SequenceGenerator(nn.Module):
         beam_size=1,
         max_len_a=0,
         max_len_b=200,
-        max_len=0,
+        max_len=None,
         min_len=1,
         normalize_scores=True,
         len_penalty=1.0,
@@ -112,6 +112,7 @@ class SequenceGenerator(nn.Module):
         self.search = (
             search.BeamSearch(tgt_dict) if search_strategy is None else search_strategy
         )
+        self.search.stop_on_max_len = True
         # We only need to set src_lengths in LengthConstrainedBeamSearch.
         # As a module attribute, setting it would break in multithread
         # settings when the model is shared.
@@ -223,6 +224,8 @@ class SequenceGenerator(nn.Module):
             ],
         )
         net_input = sample["net_input"]
+        
+        self.max_len = self.min_len = net_input['prev_output_tokens'].size(1)-1
 
         if "src_tokens" in net_input:
             src_tokens = net_input["src_tokens"]
@@ -263,6 +266,8 @@ class SequenceGenerator(nn.Module):
         max_len: int = -1
         if self.match_source_len:
             max_len = src_lengths.max().item()
+        elif self.max_len is not None:
+            max_len = int(self.max_len)
         else:
             max_len = int(self.max_len_a * src_len + self.max_len_b)
         assert (
@@ -281,14 +286,14 @@ class SequenceGenerator(nn.Module):
 
         # initialize buffers
         scores = (
-            torch.zeros(bsz * beam_size, max_len + 1).to(src_tokens).float()
-        )  # +1 for eos; pad is never chosen for scoring
+            torch.zeros(bsz * beam_size, max_len).to(src_tokens).float()
+        )  # pad is never chosen for scoring
         tokens = (
-            torch.zeros(bsz * beam_size, max_len + 2)
+            torch.zeros(bsz * beam_size, max_len + 1)
             .to(src_tokens)
             .long()
-            .fill_(self.pad)
-        )  # +2 for eos and pad
+            .fill_(-1)
+        )  # +1 for initial
         # tokens[:, 0] = self.eos if bos_token is None else bos_token
         tokens[:, 0] = self.bos
         attn: Optional[Tensor] = None
@@ -378,30 +383,10 @@ class SequenceGenerator(nn.Module):
                 lprobs, tokens, scores = self._prefix_tokens(
                     step, lprobs, scores, tokens, prefix_tokens, beam_size
                 )
-            elif step < self.min_len:
-                # minimum length constraint (does not apply if using prefix_tokens)
-                lprobs[:, self.eos] = -math.inf
 
-            lprobs[lprobs != lprobs] = torch.tensor(-math.inf).to(lprobs)
-
-            lprobs[:, self.pad] = -math.inf  # never select pad
-            lprobs[:, self.unk] -= self.unk_penalty  # apply unk penalty
-
-            if (self.gen_code or self.gen_box) and step < max_len:
-                lprobs[:, :4] = -math.inf
-            if self.gen_box:
-                lprobs[:, -1] = -math.inf
-                if (step + 1) % 5 == 0:
-                    lprobs[:, self.constraint_start:59457] = -math.inf
-                else:
-                    lprobs[:, 59457:] = -math.inf
+            # lprobs[lprobs != lprobs] = torch.tensor(-math.inf).to(lprobs)
 
             # handle max length constraint
-            if step >= max_len:
-                lprobs[:, : self.eos] = -math.inf
-                lprobs[:, self.eos + 1 :] = -math.inf
-                if self.ignore_eos:
-                    lprobs[:, self.eos] = 1
 
             # Record attention scores, only support avg_attn_scores is a Tensor
             if avg_attn_scores is not None:
@@ -428,12 +413,12 @@ class SequenceGenerator(nn.Module):
             # Shape: (batch, cand_size)
             cand_scores, cand_indices, cand_beams = self.search.step(
                 step,
-                lprobs.view(bsz, -1, self.vocab_size),
+                lprobs.view(bsz, -1, 151), # 151 instead of self.vocab_size
                 scores.view(bsz, beam_size, -1)[:, :, :step],
                 tokens[:, : step + 1],
                 original_batch_idxs,
             )
-
+            
             # cand_bbsz_idx contains beam indices for the top candidate
             # hypotheses, with a range of values: [0, bsz*beam_size),
             # and dimensions: [bsz, cand_size]
@@ -441,8 +426,10 @@ class SequenceGenerator(nn.Module):
 
             # finalize hypotheses that end in eos
             # Shape of eos_mask: (batch size, beam size)
-            eos_mask = cand_indices.eq(self.eos) & cand_scores.ne(-math.inf)
-            eos_mask[:, :beam_size][cands_to_ignore] = torch.tensor(0).to(eos_mask)
+            # eos_mask = cand_indices.eq(self.eos) & cand_scores.ne(-math.inf)
+            # eos_mask[:, :beam_size][cands_to_ignore] = torch.tensor(0).to(eos_mask)
+
+            eos_mask = torch.zeros_like(cand_indices, dtype=torch.bool)
 
             # only consider eos when it's among the top beam_size indices
             # Now we know what beam item(s) to finish
@@ -585,17 +572,28 @@ class SequenceGenerator(nn.Module):
             # reorder incremental state in decoder
             reorder_state = active_bbsz_idx
 
-        # sort by score descending
-        for sent in range(len(finalized)):
-            scores = torch.tensor(
-                [float(elem["score"].item()) for elem in finalized[sent]]
-            )
-            _, sorted_scores_indices = torch.sort(scores, descending=True)
-            finalized[sent] = [finalized[sent][ssi] for ssi in sorted_scores_indices]
-            finalized[sent] = torch.jit.annotate(
-                List[Dict[str, Tensor]], finalized[sent]
-            )
-        return finalized
+        
+        final_scores = scores[:, -1] # (B * beam) x ()
+        final_scores = final_scores.reshape(bsz, beam_size)
+        argmax = final_scores.argmax(1) # B
+        batch_idx = torch.arange(bsz, device=argmax.device)
+        
+        tokens = tokens.reshape(bsz, beam_size, -1)
+        final_prediction = tokens[batch_idx, argmax, 1:] # exclude bos
+        
+        return final_prediction
+
+        # # sort by score descending
+        # for sent in range(len(finalized)):
+        #     scores = torch.tensor(
+        #         [float(elem["score"].item()) for elem in finalized[sent]]
+        #     )
+        #     _, sorted_scores_indices = torch.sort(scores, descending=True)
+        #     finalized[sent] = [finalized[sent][ssi] for ssi in sorted_scores_indices]
+        #     finalized[sent] = torch.jit.annotate(
+        #         List[Dict[str, Tensor]], finalized[sent]
+        #     )
+        # return finalized
 
     def _prefix_tokens(
         self, step: int, lprobs, scores, tokens, prefix_tokens, beam_size: int
