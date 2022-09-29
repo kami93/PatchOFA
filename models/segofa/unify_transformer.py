@@ -1256,7 +1256,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         num_seg = 151
         seg_embed_idx = []
         for i in range(num_seg):
-            seg_embed_idx.append(self.dictionary.index("<seg_{i}>"))
+            seg_embed_idx.append(self.dictionary.index(f"<seg_{i}>"))
         seg_embed_idx = torch.tensor(seg_embed_idx, dtype=torch.long)
         self.register_buffer("seg_embed_idx", seg_embed_idx) # self.seg_embed_idx
 
