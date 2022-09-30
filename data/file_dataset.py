@@ -62,8 +62,13 @@ class FileDataset:
                 else:
                     time.sleep(3)
 
-            with open(cache_path, "rb") as fp:
-                self.total_row_count, self.lineid_to_offset = pickle.load(fp)
+            while True:
+                try:
+                    with open(cache_path, "rb") as fp:
+                        self.total_row_count, self.lineid_to_offset = pickle.load(fp)
+                    break
+                except:
+                    pass
 
         else:
             self._sweep_datafile()
