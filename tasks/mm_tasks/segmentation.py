@@ -13,6 +13,9 @@ from collections import OrderedDict
 import torch
 import os
 
+from einops import rearrange
+from mmseg.ops import resize
+
 import numpy as np
 import sacrebleu
 import string
@@ -225,7 +228,7 @@ class SegmentationTask(OFATask):
         gen_out = self.inference_step(generator, [model], sample)
         
         hyps = gen_out
-        refs = sample["target"][:, :-1]
+        refs = sample["downsampled_target"][:, :-1]
         
         if self.cfg.eval_print_samples:
             logger.info("example hypothesis: " + hyps)

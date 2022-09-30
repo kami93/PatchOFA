@@ -62,6 +62,10 @@ def collate(samples, pad_idx, eos_idx):
 
         if samples[0].get("prev_output_tokens", None) is not None:
             prev_output_tokens = merge("prev_output_tokens")
+
+        if samples[0].get("downsampled_target", None) is not None:
+            downsampled_target = merge("downsampled_target")
+
     else:
         ntokens = src_lengths.sum().item()
 
@@ -77,6 +81,7 @@ def collate(samples, pad_idx, eos_idx):
             "prev_output_tokens": prev_output_tokens
         },
         "target": target,
+        "downsampled_target": downsampled_target
     }
 
     return batch
@@ -217,11 +222,8 @@ class SegmentationDataset(OFADataset):
         
         prev_output_item = torch.cat([self.bos_item, seg_ids_downsampled])
         
-        downsampled_target = True
-        if downsampled_target:
-            target = torch.cat([seg_ids_downsampled, self.eos_item])
-        else:
-            target = torch.cat([seg_ids, self.eos_item])
+        downsampled_target = torch.cat([seg_ids_downsampled, self.eos_item])
+        target = torch.cat([seg_ids, self.eos_item])
             
         example = {
             "id": uniq_id,
@@ -229,6 +231,7 @@ class SegmentationDataset(OFADataset):
             "patch_image": img,
             "patch_mask": patch_mask,
             "target": target,
+            "downsampled_target": downsampled_target,
             "prev_output_tokens": prev_output_item
         }
         return example

@@ -60,7 +60,19 @@ class SegLabelSmoothedCrossEntropyCriterionConfig(FairseqDataclass):
         default=None,
         metadata={"help": "constraint range"}
     )
+    upscale_lprobs: str = field(
+        default='true',
+        metadata={"help": "true | fasle"}
+    )
 
+def resolve_str_true_false(x):
+    x = x.lower()
+    if x == 'true':
+        return True
+    elif x == 'false':
+        return False
+    else:
+        raise ValueError(f"Unable to recognize string bool input: {x}")
 
 def construct_rdrop_sample(x):
     if isinstance(x, dict):
@@ -147,7 +159,8 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         use_rdrop=False,
         reg_alpha=1.0,
         sample_patch_num=196,
-        constraint_range=None
+        constraint_range=None,
+        upscale_lprobs='true',
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -160,6 +173,8 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         self.use_rdrop = use_rdrop
         self.reg_alpha = reg_alpha
         self.sample_patch_num = sample_patch_num
+
+        self.upscale_lprobs = resolve_str_true_false(upscale_lprobs)
         
         self.seg_id_offset = task.target_dictionary.index("<seg_0>")
         self.constraint_start = None
@@ -177,26 +192,6 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         2) the sample size, which is used as the denominator for the gradient
         3) logging outputs to display while training
         """
-        if isinstance(sample, list):
-            if self.sample_patch_num > 0:
-                sample[0]['net_input']['sample_patch_num'] = self.sample_patch_num
-            loss_v1, sample_size_v1, logging_output_v1 = self.forward(model, sample[0], update_num, reduce)
-            loss_v2, sample_size_v2, logging_output_v2 = self.forward(model, sample[1], update_num, reduce)
-            loss = loss_v1 / sample_size_v1 + loss_v2 / sample_size_v2
-            sample_size = 1
-            logging_output = {
-                "loss": loss.data,
-                "loss_v1": loss_v1.data,
-                "loss_v2": loss_v2.data,
-                "nll_loss": logging_output_v1["nll_loss"].data / sample_size_v1 + logging_output_v2["nll_loss"].data / sample_size_v2,
-                "ntokens": logging_output_v1["ntokens"] + logging_output_v2["ntokens"],
-                "nsentences": logging_output_v1["nsentences"] + logging_output_v2["nsentences"],
-                "sample_size": 1,
-                "sample_size_v1": sample_size_v1,
-                "sample_size_v2": sample_size_v2,
-            }
-            return loss, sample_size, logging_output
-
         if self.use_rdrop:
             construct_rdrop_sample(sample)
 
@@ -228,13 +223,24 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             net_output[0][:, :, 4:self.constraint_start] = -math.inf
             net_output[0][:, :, self.constraint_end:] = -math.inf
         lprobs = model.get_normalized_probs(net_output, log_probs=True) * conf
-        target = model.get_targets(sample, net_output)
         
+        if self.upscale_lprobs:
+            lprobs_ = lprobs[:, :-1]
+            lprobs_ = rearrange(lprobs_, 'b (h w) d -> b d h w', h=32, w=32)
+            lprobs_ = resize(lprobs_, size=(512, 512), mode='bilinear', align_corners=False)
+            lprobs_ = rearrange(lprobs_, 'b d h w -> b (h w) d')
+            lprobs = torch.cat([lprobs_, lprobs[:, -1:]], dim=1)
+
+            target = sample["target"]
+        else:
+            target = sample["downsampled_target"]
+
         if self.ignore_prefix_size > 0:
             lprobs = lprobs[:, self.ignore_prefix_size :, :].contiguous()
             target = target[:, self.ignore_prefix_size :].contiguous()
             if constraint_masks is not None:
                 constraint_masks = constraint_masks[:, self.ignore_prefix_size :, :].contiguous()
+                
         if self.ignore_eos:
             bsz, seq_len, embed_dim = lprobs.size()
             eos_indices = target.eq(self.task.tgt_dict.eos())
@@ -242,6 +248,7 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             target = target[~eos_indices].reshape(bsz, seq_len-1)
             if constraint_masks is not None:
                 constraint_masks = constraint_masks[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
+
         if constraint_masks is not None:
             constraint_masks = constraint_masks.view(-1, constraint_masks.size(-1))
         return lprobs.view(-1, lprobs.size(-1)), target.view(-1), constraint_masks
@@ -252,15 +259,6 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             constraint_masks = constraint_masks[target != self.padding_idx]
         
         bsz = sample['net_input']['patch_images'].size(0)
-        
-        # lprobs = rearrange(lprobs, '(b hwc) d -> b hwc d', b=bsz)        
-        # lprobs_ = lprobs[:, 1:]
-        # lprobs_ = rearrange(lprobs_, 'b (h w) d -> b d h w', h=32, w=32)
-        # lprobs_ = resize(lprobs_, size=(512, 512), mode='bilinear', align_corners=False)
-        # lprobs_ = rearrange(lprobs_, 'b d h w -> b (h w) d')
-        # lprobs = torch.cat([lprobs[:, :1], lprobs_], dim=1)
-        # lprobs = rearrange(lprobs, 'b hwc d -> (b hwc) d')
-        
         assert self.ignore_eos
         
         mask = torch.logical_and(target != self.padding_idx, target != (self.seg_id_offset+150))
@@ -297,23 +295,13 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
     def reduce_metrics(cls, logging_outputs) -> None:
         """Aggregate logging outputs from data parallel training."""
         loss_sum = sum(log.get("loss", 0) for log in logging_outputs)
-        loss_sum_v1 = sum(log.get("loss_v1", 0) for log in logging_outputs)
-        loss_sum_v2 = sum(log.get("loss_v2", 0) for log in logging_outputs)
         nll_loss_sum = sum(log.get("nll_loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
-        sample_size_v1 = sum(log.get("sample_size_v1", 0) for log in logging_outputs)
-        sample_size_v2 = sum(log.get("sample_size_v2", 0) for log in logging_outputs)
 
         metrics.log_scalar(
             "loss", loss_sum / sample_size, sample_size, round=3
-        )
-        metrics.log_scalar(
-            "loss_v1", loss_sum_v1 / max(sample_size_v1, 1), max(sample_size_v1, 1), round=3
-        )
-        metrics.log_scalar(
-            "loss_v2", loss_sum_v2 / max(sample_size_v2, 1), max(sample_size_v2, 1), round=3
         )
         metrics.log_scalar(
             "nll_loss", nll_loss_sum / sample_size, ntokens, round=3
@@ -321,7 +309,6 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         metrics.log_derived(
             "ppl", lambda meters: utils.get_perplexity(meters["nll_loss"].avg)
         )
-
         metrics.log_scalar(
             "ntokens", ntokens, 1, round=3
         )
@@ -330,12 +317,6 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         )
         metrics.log_scalar(
             "sample_size", sample_size, 1, round=3
-        )
-        metrics.log_scalar(
-            "sample_size_v1", sample_size_v1, 1, round=3
-        )
-        metrics.log_scalar(
-            "sample_size_v2", sample_size_v2, 1, round=3
         )
 
         total = utils.item(sum(log.get("total", 0) for log in logging_outputs))
