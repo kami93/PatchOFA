@@ -110,12 +110,12 @@ class SegmentationTask(OFATask):
         assert len(paths) > 0
 
         if split == 'train':
-            file_path = paths[0]
+            table_path = paths[(epoch - 1) % (len(paths) - 1)]
         else:
-            file_path = paths[-1]
+            table_path = paths[-1]
         
         assert self.cfg.selected_cols == '0,1,2'
-        dataset = FileDataset(file_path, self.cfg.selected_cols)
+        dataset = FileDataset(table_path, self.cfg.selected_cols)
 
         self.datasets[split] = SegmentationDataset(
             split,
@@ -159,13 +159,30 @@ class SegmentationTask(OFATask):
         loss, sample_size, logging_output = criterion(model, sample)
 
         model.eval()
-        if self.cfg.eval_acc:
-            hyps, refs = self._inference(self.sequence_generator, sample, model)
-            refs = refs - criterion.seg_id_offset
 
-            scores = (refs == hyps).float()
-            logging_output["_acc_score_sum"] = scores.sum().item()
-            logging_output["_acc_cnt"] = scores.numel()
+        hyps, refs = self._inference(self.sequence_generator, sample, model)
+
+        pred_label = hyps
+        label = refs - criterion.seg_id_offset
+        num_classes = 151
+
+        mask = (label != 150)
+        pred_label = pred_label[mask]
+        label = label[mask]
+
+        intersect = pred_label[pred_label == label]
+        area_intersect = torch.histc(
+            intersect.float(), bins=(num_classes), min=0, max=num_classes - 1)
+        area_pred_label = torch.histc(
+            pred_label.float(), bins=(num_classes), min=0, max=num_classes - 1)
+        area_label = torch.histc(
+            label.float(), bins=(num_classes), min=0, max=num_classes - 1)
+        area_union = area_pred_label + area_label - area_intersect
+
+        logging_output["_area_intersect"] = area_intersect
+        logging_output["_area_pred_label"] = area_pred_label
+        logging_output["_area_label"] = area_label
+        logging_output["_area_union"] = area_union
 
         return loss, sample_size, logging_output
 
@@ -179,15 +196,30 @@ class SegmentationTask(OFATask):
                 result = result.cpu()
             return result
 
-        def compute_score(meters):
-            score = meters["_acc_score_sum"].sum / meters["_acc_cnt"].sum
-            score = score if isinstance(score, float) else score.item()
-            return round(score, 4)
+        def compute_all_acc(meters):
+            all_acc = meters['_area_intersect'].sum.sum() / meters['_area_pred_label'].sum.sum()
+            all_acc = all_acc if isinstance(all_acc, float) else all_acc.item()
+            return round(all_acc, 4)
 
-        if sum_logs("_acc_cnt") > 0:
-            metrics.log_scalar("_acc_score_sum", sum_logs("_acc_score_sum"))
-            metrics.log_scalar("_acc_cnt", sum_logs("_acc_cnt"))
-            metrics.log_derived("acc_score", compute_score)
+        def compute_mean_iou(meters):
+            miou = (meters['_area_intersect'].sum / (meters['_area_union'].sum + 1e-9)).mean()
+            miou = miou if isinstance(miou, float) else miou.item()
+            return round(miou, 4)
+
+        def compute_mean_acc(meters):
+            macc = (meters['_area_intersect'].sum / (meters['_area_label'].sum + 1e-9)).mean()
+            macc = macc if isinstance(macc, float) else macc.item()
+            return round(macc, 4)
+
+        if "_area_union" in logging_outputs[0]: # check if valid
+            metrics.log_scalar("_area_intersect", sum_logs("_area_intersect"))
+            metrics.log_scalar("_area_pred_label", sum_logs("_area_pred_label"))
+            metrics.log_scalar("_area_label", sum_logs("_area_label"))
+            metrics.log_scalar("_area_union", sum_logs("_area_union"))
+
+            metrics.log_derived("aAcc_seg", compute_all_acc)
+            metrics.log_derived("mIoU_seg", compute_mean_iou)
+            metrics.log_derived("mAcc_seg", compute_mean_acc)
 
     def _inference(self, generator, sample, model):
         gen_out = self.inference_step(generator, [model], sample)
