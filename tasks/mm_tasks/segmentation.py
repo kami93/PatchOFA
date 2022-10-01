@@ -159,33 +159,34 @@ class SegmentationTask(OFATask):
         return ((ious >= thresh) & (interacts_w > 0) & (interacts_h > 0)).float()
 
     def valid_step(self, sample, model, criterion):
+        model.eval()
         loss, sample_size, logging_output = criterion(model, sample)
 
-        model.eval()
+        # model.eval()
 
-        hyps, refs = self._inference(self.sequence_generator, sample, model)
+        # hyps, refs = self._inference(self.sequence_generator, sample, model)
 
-        pred_label = hyps
-        label = refs - criterion.seg_id_offset
-        num_classes = 151
+        # pred_label = hyps
+        # label = refs - criterion.seg_id_offset
+        # num_classes = 151
 
-        mask = (label != 150)
-        pred_label = pred_label[mask]
-        label = label[mask]
+        # mask = (label != 150)
+        # pred_label = pred_label[mask]
+        # label = label[mask]
 
-        intersect = pred_label[pred_label == label]
-        area_intersect = torch.histc(
-            intersect.float(), bins=(num_classes), min=0, max=num_classes - 1)
-        area_pred_label = torch.histc(
-            pred_label.float(), bins=(num_classes), min=0, max=num_classes - 1)
-        area_label = torch.histc(
-            label.float(), bins=(num_classes), min=0, max=num_classes - 1)
-        area_union = area_pred_label + area_label - area_intersect
+        # intersect = pred_label[pred_label == label]
+        # area_intersect = torch.histc(
+        #     intersect.float(), bins=(num_classes), min=0, max=num_classes - 1)
+        # area_pred_label = torch.histc(
+        #     pred_label.float(), bins=(num_classes), min=0, max=num_classes - 1)
+        # area_label = torch.histc(
+        #     label.float(), bins=(num_classes), min=0, max=num_classes - 1)
+        # area_union = area_pred_label + area_label - area_intersect
 
-        logging_output["_area_intersect"] = area_intersect
-        logging_output["_area_pred_label"] = area_pred_label
-        logging_output["_area_label"] = area_label
-        logging_output["_area_union"] = area_union
+        # logging_output["_area_intersect"] = area_intersect
+        # logging_output["_area_pred_label"] = area_pred_label
+        # logging_output["_area_label"] = area_label
+        # logging_output["_area_union"] = area_union
 
         return loss, sample_size, logging_output
 
@@ -220,9 +221,9 @@ class SegmentationTask(OFATask):
             metrics.log_scalar("_area_label", sum_logs("_area_label"))
             metrics.log_scalar("_area_union", sum_logs("_area_union"))
 
-            metrics.log_derived("aAcc_seg", compute_all_acc)
-            metrics.log_derived("mIoU_seg", compute_mean_iou)
-            metrics.log_derived("mAcc_seg", compute_mean_acc)
+            metrics.log_derived("infer_aAcc", compute_all_acc)
+            metrics.log_derived("infer_mIoU", compute_mean_iou)
+            metrics.log_derived("infer_mAcc", compute_mean_acc)
 
     def _inference(self, generator, sample, model):
         gen_out = self.inference_step(generator, [model], sample)

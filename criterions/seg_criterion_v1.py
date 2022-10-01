@@ -21,7 +21,7 @@ from omegaconf import II
 
 
 @dataclass
-class SegLabelSmoothedCrossEntropyCriterionConfig(FairseqDataclass):
+class SegCriterionV1Config(FairseqDataclass):
     label_smoothing: float = field(
         default=0.0,
         metadata={"help": "epsilon for label smoothing, 0 means no label smoothing"},
@@ -143,9 +143,9 @@ def label_smoothed_nll_loss(
     return loss, nll_loss, ntokens
 
 @register_criterion(
-    "seg_label_smoothed_cross_entropy", dataclass=SegLabelSmoothedCrossEntropyCriterionConfig
+    "seg_criterion_v1", dataclass=SegCriterionV1Config
 )
-class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
+class SegCriterionV1(FairseqCriterion):
     def __init__(
         self,
         task,
@@ -196,7 +196,7 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             construct_rdrop_sample(sample)
 
         net_output = model(**sample["net_input"])
-        loss, nll_loss, ntokens = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
+        loss, nll_loss, ntokens, area_intersect, area_pred_label, area_label, area_union = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
@@ -206,6 +206,10 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
+            "area_intersect": area_intersect.data,
+            "area_pred_label": area_pred_label.data,
+            "area_label": area_label.data,
+            "area_union": area_union.data
         }
         if self.report_accuracy:
             n_correct, total = self.compute_accuracy(model, net_output, sample)
@@ -266,6 +270,18 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         target = target[mask]
         target = target - self.seg_id_offset
         
+        num_classes = lprobs.size(-1)
+        pred_label = lprobs.argmax(-1)
+
+        intersect = pred_label[pred_label == target]
+        area_intersect = torch.histc(
+            intersect.float(), bins=(num_classes), min=0, max=num_classes - 1)
+        area_pred_label = torch.histc(
+            pred_label.float(), bins=(num_classes), min=0, max=num_classes - 1)
+        area_label = torch.histc(
+            target.float(), bins=(num_classes), min=0, max=num_classes - 1)
+        area_union = area_pred_label + area_label - area_intersect
+        
         loss, nll_loss, ntokens = label_smoothed_nll_loss(
             lprobs,
             target,
@@ -280,7 +296,7 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             constraint_start=self.constraint_start,
             constraint_end=self.constraint_end
         )
-        return loss, nll_loss, ntokens
+        return loss, nll_loss, ntokens, area_intersect, area_pred_label, area_label, area_union
 
     def compute_accuracy(self, model, net_output, sample):
         lprobs, target = self.get_lprobs_and_target(model, net_output, sample)
@@ -299,6 +315,15 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
+        
+        area_intersect_sum = sum(log.get("area_intersect", 0) for log in logging_outputs)
+        area_pred_label_sum = sum(log.get("area_pred_label", 0) for log in logging_outputs)
+        area_label_sum = sum(log.get("area_label", 0) for log in logging_outputs)
+        area_union_sum = sum(log.get("area_union", 0) for log in logging_outputs)
+
+        aacc = area_intersect_sum.sum() / area_pred_label_sum.sum()
+        miou = (area_intersect_sum / (area_union_sum + 1e-9)).mean()
+        macc = (area_intersect_sum / (area_label_sum + 1e-9)).mean()
 
         metrics.log_scalar(
             "loss", loss_sum / sample_size, sample_size, round=3
@@ -317,6 +342,15 @@ class SegLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         )
         metrics.log_scalar(
             "sample_size", sample_size, 1, round=3
+        )
+        metrics.log_scalar(
+            "aAcc", aacc / sample_size, 1, round=3
+        )
+        metrics.log_scalar(
+            "mIoU", miou / sample_size, 1, round=3
+        )
+        metrics.log_scalar(
+            "mAcc", macc / sample_size, 1, round=3
         )
 
         total = utils.item(sum(log.get("total", 0) for log in logging_outputs))

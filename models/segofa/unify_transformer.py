@@ -31,7 +31,7 @@ from fairseq.modules import (
 from fairseq.modules.checkpoint_activations import checkpoint_wrapper
 from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
 from torch import Tensor
-from einops import rearrange
+from einops import rearrange, repeat
 
 from .unify_transformer_layer import TransformerEncoderLayer, TransformerDecoderLayer
 from .resnet import ResNet
@@ -345,6 +345,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='scale heads')
         parser.add_argument('--scale-resids', action='store_true',
                             help='scale resids')
+        parser.add_argument('--one-step-decoder-type', type=str,
+                            help='mask | region')
         # fmt: on
 
     @classmethod
@@ -1266,6 +1268,11 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.register_buffer("image_position_idx", image_position_idx)
         
         self.entangle_position_embedding = args.entangle_position_embedding
+        
+        self.register_buffer("bin_id_offset", torch.tensor([self.dictionary.index("<bin_0>")]))
+        self.register_buffer("region_prefix", torch.tensor([976,  35])) # "region: "
+        
+        self.one_step_decoder_type = args.one_step_decoder_type
 
     def get_decoder_prompt(self, prompt_tokens):
         past_key_values = self.decoder_prompt_encoder(prompt_tokens)
@@ -1360,6 +1367,45 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         
         return abs_pos_bias
 
+    def get_cross_pos_info(self, tokens, tgt_pos_embed, src_pos_embed=None, use_image=False, use_seg=False):
+        batch_size = tokens.size(0)
+        tgt_len = tokens.size(1)
+        
+        assert not(use_image and use_seg)
+        
+        if use_image:
+            tgt_pos_embed = self.image_pos_ln(tgt_pos_embed)
+        elif use_seg:
+            tgt_pos_embed = self.seg_pos_ln(tgt_pos_embed)
+        else:
+            tgt_pos_embed = self.pos_ln(tgt_pos_embed)
+        
+        if src_pos_embed is not None:
+
+            bsz, img_len, seq_len, dim = tgt_pos_embed.shape
+            pos_q = self.cross_pos_q_linear(tgt_pos_embed).reshape(
+                bsz, img_len, seq_len, self.num_attention_heads, -1
+            ) * self.pos_scaling
+            
+            bsz, src_len, dim = src_pos_embed.shape
+            pos_k = self.cross_pos_k_linear(src_pos_embed).reshape(
+                bsz, src_len, self.num_attention_heads, -1
+            )
+            abs_pos_bias = torch.einsum('bishd,brhd->bihsr', pos_q, pos_k)
+            abs_pos_bias = rearrange(abs_pos_bias, 'b i h s r -> (b i) h s r')
+            
+        else:
+            src_len = tgt_pos_embed.size(1)
+            pos_q = self.self_pos_q_linear(tgt_pos_embed).view(
+                batch_size, tgt_len, self.num_attention_heads, -1
+            ).transpose(1, 2) * self.pos_scaling
+            pos_k = self.self_pos_k_linear(tgt_pos_embed).view(
+                batch_size, src_len, self.num_attention_heads, -1
+            ).transpose(1, 2)
+            abs_pos_bias = torch.matmul(pos_q, pos_k.transpose(2, 3))
+        
+        return abs_pos_bias
+
     def forward(
         self,
         prev_output_tokens,
@@ -1416,7 +1462,13 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
     ):
-        return self.extract_features_scriptable(
+        
+        if self.one_step_decoder_type == 'region':
+            extract_features_scriptable = self.extract_features_scriptable_region
+        elif self.one_step_decoder_type == 'mask':
+            extract_features_scriptable = self.extract_features_scriptable_mask
+        
+        return extract_features_scriptable(
             prev_output_tokens,
             code_masks,
             encoder_out,
@@ -1431,8 +1483,212 @@ class TransformerDecoder(FairseqIncrementalDecoder):
     super().extract_features, but super() is not supported in torchscript. A copy of
     this function is made to be used in the subclass instead.
     """
+    def extract_features_scriptable_region(
+            self,
+            prev_output_tokens,
+            code_masks: Optional[torch.Tensor],
+            encoder_out: Optional[Dict[str, List[Tensor]]],
+            incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+            full_context_alignment: bool = False,
+            alignment_layer: Optional[int] = None,
+            alignment_heads: Optional[int] = None,
+        ):
+            """
+            Similar to *forward* but only return features.
 
-    def extract_features_scriptable(
+            Includes several features from "Jointly Learning to Align and
+            Translate with Transformer Models" (Garg et al., EMNLP 2019).
+
+            Args:
+                full_context_alignment (bool, optional): don't apply
+                    auto-regressive mask to self-attention (default: False).
+                alignment_layer (int, optional): return mean alignment over
+                    heads at this layer (default: last layer).
+                alignment_heads (int, optional): only average alignment over
+                    this many heads (default: all heads).
+
+            Returns:
+                tuple:
+                    - the decoder's features of shape `(batch, tgt_len, embed_dim)`
+                    - a dictionary with any model-specific outputs
+            """        
+            prompt_tokens = None
+            prompt_padding_mask = None
+            prompt_kv_list = None
+            if self.args.decoder_prompt:
+                bsz, seq_len = prev_output_tokens.shape[0], prev_output_tokens.shape[1]
+                if self.args.decoder_prompt_type in ("prefix"):
+                    prompt_tokens = torch.arange(
+                        0, self.args.decoder_prompt_length).to(
+                        prev_output_tokens.device)
+                    prompt_tokens = prompt_tokens.unsqueeze(0).expand(bsz, -1)
+                    prompt_padding_mask = torch.zeros_like(prompt_tokens).to(prompt_tokens.device)
+                prompt_kv_list = self.get_decoder_prompt(prompt_tokens)
+            bs, slen = prev_output_tokens.size()
+            if alignment_layer is None:
+                alignment_layer = self.num_layers - 1
+
+            enc: Optional[Tensor] = None
+            padding_mask: Optional[Tensor] = None
+            if encoder_out is not None and len(encoder_out["encoder_out"]) > 0:
+                enc = encoder_out["encoder_out"][0]
+                assert (
+                    enc.size()[1] == bs
+                ), f"Expected enc.shape == (t, {bs}, c) got {enc.shape}"
+            if encoder_out is not None and len(encoder_out["encoder_padding_mask"]) > 0:
+                padding_mask = encoder_out["encoder_padding_mask"][0]
+
+            # bsz, tgt_len = prev_output_tokens.shape
+            
+            patch_images = encoder_out["patch_images"][0]
+            bsz, _, tgt_h, tgt_w = patch_images.shape
+            tgt_h = tgt_h // 16
+            tgt_w = tgt_w // 16
+            tgt_len = tgt_w * tgt_h + 1
+            
+            ### TODO: add box region to prev_output_tokens
+            
+            # prev_output_tokens
+            num_codes = 1000
+            h_ids = torch.linspace(0, 1, steps=tgt_h+1, device=patch_images.device)
+            w_ids = torch.linspace(0, 1, steps=tgt_w+1, device=patch_images.device)
+            
+            box_coord = torch.meshgrid([w_ids, h_ids])
+            box_coord = torch.stack(box_coord, dim=-1)
+            box_coord = (box_coord * (num_codes-1)).long()
+            
+            w_indexer = torch.arange(tgt_w+1, device=patch_images.device).unfold(0, 2, 1)
+            h_indexer = torch.arange(tgt_h+1, device=patch_images.device).unfold(0, 2, 1)
+            
+            w_indexer = w_indexer.unsqueeze(1).expand(-1, tgt_h, -1)
+            h_indexer = h_indexer.unsqueeze(0).expand(tgt_w, -1, -1)
+            
+            final_coords = box_coord[w_indexer, h_indexer]
+            final_coords = final_coords.reshape(tgt_w, tgt_h, -1)
+            final_coords = final_coords.transpose(0, 1).reshape(-1, 4)
+            
+            final_bin_id = final_coords + self.bin_id_offset
+            region_prefix = self.region_prefix.unsqueeze(0).expand(tgt_h*tgt_w, -1)
+            
+            prefix = torch.cat([region_prefix, final_bin_id], dim=1)
+            prefix = prefix.unsqueeze(0).expand(bsz, -1, -1)
+            
+            prev_output_tokens = torch.cat([prev_output_tokens[:, :1].unsqueeze(-1).expand(-1, tgt_h*tgt_w, -1), prefix, prev_output_tokens[:, 1:].unsqueeze(-1)], dim=-1)
+            prev_output_tokens = rearrange(prev_output_tokens, 'b l d -> (b l) d')
+            
+            bsz, tgt_len = prev_output_tokens.shape
+            token_position_idx = utils.new_arange(prev_output_tokens)
+            tgt_pos_embed = self.embed_positions(token_position_idx)
+            
+            self_abs_pos_bias = self.get_pos_info(prev_output_tokens, tgt_pos_embed, use_image=False)
+
+            # cross attn position bias
+            src_pos_embed = encoder_out['position_embeddings'][0]
+            cross_abs_pos_bias = self.get_cross_pos_info(prev_output_tokens, rearrange(tgt_pos_embed, '(b l) r d -> b l r d', l=tgt_h*tgt_w), src_pos_embed=src_pos_embed)
+            cross_abs_pos_bias = cross_abs_pos_bias.reshape(-1, *cross_abs_pos_bias.size()[-2:])
+
+            all_prev_output_tokens = prev_output_tokens.clone()
+            if incremental_state is not None:
+                prev_output_tokens = prev_output_tokens[:, -1:]
+                cross_abs_pos_bias = cross_abs_pos_bias[:, -1:, :]
+                tgt_pos_embed = tgt_pos_embed[:, -1:, :]
+
+            # embed tokens and positions
+            x = self.embed_scale * self.embed_tokens(prev_output_tokens)
+
+            if self.quant_noise is not None:
+                x = self.quant_noise(x)
+
+            if self.project_in_dim is not None:
+                x = self.project_in_dim(x)
+
+            if self.entangle_position_embedding is not None and not self.args.disable_entangle:
+                x += tgt_pos_embed
+
+            if self.layernorm_embedding is not None:
+                x = self.layernorm_embedding(x)
+
+            x = self.dropout_module(x)
+
+            # B x T x C -> T x B x C
+            x = x.transpose(0, 1)
+
+            self_attn_padding_mask: Optional[Tensor] = None
+            if self.cross_self_attention or prev_output_tokens.eq(self.padding_idx).any():
+                self_attn_padding_mask = prev_output_tokens.eq(self.padding_idx)
+                if prompt_padding_mask is not None:
+                    self_attn_padding_mask = torch.cat([prompt_padding_mask, self_attn_padding_mask], dim=1)
+
+            # decoder layers
+            attn: Optional[Tensor] = None
+            inner_states: List[Optional[Tensor]] = [x]
+            for idx, layer in enumerate(self.layers):
+                if incremental_state is None and not full_context_alignment:
+                    self_attn_mask = self.buffered_future_mask(x)
+                    if self.args.decoder_prompt:
+                        seq_len, prompt_len = x.size(0), prompt_tokens.size(1)
+                        prompt_mask = torch.zeros([seq_len, prompt_len]).to(x.device)
+                        self_attn_mask = torch.cat([prompt_mask, self_attn_mask], dim=1)
+                else:
+                    self_attn_mask = None
+
+                self_attn_bias = self_abs_pos_bias.clone()
+                self_attn_bias += self.get_rel_pos_bias(all_prev_output_tokens, idx).unsqueeze(0)
+                
+                self_attn_bias = self_attn_bias.reshape(-1, *self_attn_bias.size()[-2:])
+                if incremental_state is not None:
+                    self_attn_bias = self_attn_bias[:, -1:, :]
+
+                if self.args.decoder_prompt:
+                    if self.args.decoder_prompt_type != "prompt":
+                        prompt_kv = prompt_kv_list[idx]
+                    else:
+                        if idx == 0:
+                            prompt_kv = prompt_kv_list[idx]
+                        else:
+                            prompt_kv = None
+                else:
+                    prompt_kv = None
+
+                x, layer_attn, _ = layer(
+                    x,
+                    enc,
+                    padding_mask,
+                    incremental_state,
+                    self_attn_mask=self_attn_mask,
+                    self_attn_padding_mask=self_attn_padding_mask,
+                    need_attn=bool((idx == alignment_layer)),
+                    need_head_weights=bool((idx == alignment_layer)),
+                    self_attn_bias=self_attn_bias,
+                    cross_attn_bias=cross_abs_pos_bias,
+                    prompt_kv=prompt_kv
+                )
+                inner_states.append(x)
+                if layer_attn is not None and idx == alignment_layer:
+                    attn = layer_attn.float().to(x)
+
+            if attn is not None:
+                if alignment_heads is not None:
+                    attn = attn[:alignment_heads]
+
+                # average probabilities over heads
+                attn = attn.mean(dim=0)
+
+            if self.layer_norm is not None:
+                x = self.layer_norm(x)
+                
+            # T x B x C -> B x T x C
+            x = x.transpose(0, 1)
+
+            if self.project_out_dim is not None:
+                x = self.project_out_dim(x)
+
+            final_out = x[:, -2:]
+            final_out = rearrange(final_out, '(b hw) c d -> b hw c d', hw=tgt_h*tgt_w)
+
+            return final_out, {"attn": [attn], "inner_states": inner_states}
+
+    def extract_features_scriptable_mask(
         self,
         prev_output_tokens,
         code_masks: Optional[torch.Tensor],
@@ -1495,6 +1751,16 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         tgt_w = tgt_w // 16
         tgt_len = tgt_w * tgt_h + 1
         
+        bsz, psz =  padding_mask.size()
+
+        padding_mask = torch.ones(size=(bsz, tgt_w*tgt_h, psz), dtype=torch.bool, device=patch_images.device)
+        padding_mask_patch, padding_mask_text = padding_mask.split(dim=-1, split_size=[tgt_h*tgt_w, psz-tgt_h*tgt_w])
+        
+        padding_mask_patch = torch.triu(padding_mask_patch, diagonal=1)
+        padding_mask_text = torch.logical_not(padding_mask_text)
+        
+        padding_mask = torch.cat([padding_mask_patch, padding_mask_text], dim=-1)
+
         # token_position_idx = utils.new_arange(prev_output_tokens)
         old_token_position_idx = torch.arange(1025, dtype=prev_output_tokens.dtype, device=prev_output_tokens.device)
         old_token_position_idx = old_token_position_idx.unsqueeze(0).expand(bsz, -1)
@@ -1506,7 +1772,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         tgt_pos_embed_seg = F.interpolate(old_tgt_pos_embed_seg, size=(tgt_h, tgt_w), mode='bilinear')
         tgt_pos_embed_seg = rearrange(tgt_pos_embed_seg, 'b c h w -> b (h w) c')
         tgt_pos_embed = torch.cat([old_tgt_pos_embed_bos, tgt_pos_embed_seg], dim=1)
-        
+
         tgt_pos_embed = tgt_pos_embed[:, :prev_output_tokens.size(1)]
 
         # self attn position bias
@@ -1543,6 +1809,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
+        
+        x = torch.cat([x[:1].unsqueeze(-1).expand(tgt_h*tgt_w, -1, -1, -1), x[1:].unsqueeze(-1)], dim=-1)
+        x = rearrange(x, 't b d s -> s (b t) d')
 
         self_attn_padding_mask: Optional[Tensor] = None
         if self.cross_self_attention or prev_output_tokens.eq(self.padding_idx).any():
@@ -1550,6 +1819,14 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if prompt_padding_mask is not None:
                 self_attn_padding_mask = torch.cat([prompt_padding_mask, self_attn_padding_mask], dim=1)
 
+        idx_array = torch.arange(start=1, end=tgt_len, device=x.device)
+        idx_zeros = torch.zeros_like(idx_array)
+        idx_final_w = torch.stack([idx_zeros, idx_array, idx_zeros, idx_array], dim=-1)
+        idx_final_h = torch.stack([idx_zeros, idx_zeros, idx_array, idx_array], dim=-1)
+        
+        cross_abs_pos_bias = torch.cat([cross_abs_pos_bias[:, :1].unsqueeze(1).expand(-1, tgt_h*tgt_w, -1, -1), cross_abs_pos_bias[:, 1:].unsqueeze(2)], dim=-2)
+        cross_abs_pos_bias = rearrange(cross_abs_pos_bias, 'b t d s -> (b t) d s')
+        
         # decoder layers
         attn: Optional[Tensor] = None
         inner_states: List[Optional[Tensor]] = [x]
@@ -1561,6 +1838,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                     prompt_mask = torch.zeros([seq_len, prompt_len]).to(x.device)
                     self_attn_mask = torch.cat([prompt_mask, self_attn_mask], dim=1)
             else:
+                # make appropirate mask
                 self_attn_mask = None
 
             self_attn_bias = self_abs_pos_bias.clone()
@@ -1595,6 +1873,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if incremental_state is not None:
                 self_attn_bias = self_attn_bias[:, -1:, :]
 
+            self_attn_bias = self_attn_bias[:, idx_final_h, idx_final_w]
+            self_attn_bias = rearrange(self_attn_bias, 'b t (h w) -> (b t) h w', h=2, w=2)
+            
             if self.args.decoder_prompt:
                 if self.args.decoder_prompt_type != "prompt":
                     prompt_kv = prompt_kv_list[idx]
@@ -1639,7 +1920,219 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         if self.project_out_dim is not None:
             x = self.project_out_dim(x)
 
+        x = rearrange(x, '(b hw) c d -> b hw c d', hw=tgt_h*tgt_w)
+
         return x, {"attn": [attn], "inner_states": inner_states}
+
+    def old_extract_features_scriptable(
+            self,
+            prev_output_tokens,
+            code_masks: Optional[torch.Tensor],
+            encoder_out: Optional[Dict[str, List[Tensor]]],
+            incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+            full_context_alignment: bool = False,
+            alignment_layer: Optional[int] = None,
+            alignment_heads: Optional[int] = None,
+        ):
+            """
+            Similar to *forward* but only return features.
+
+            Includes several features from "Jointly Learning to Align and
+            Translate with Transformer Models" (Garg et al., EMNLP 2019).
+
+            Args:
+                full_context_alignment (bool, optional): don't apply
+                    auto-regressive mask to self-attention (default: False).
+                alignment_layer (int, optional): return mean alignment over
+                    heads at this layer (default: last layer).
+                alignment_heads (int, optional): only average alignment over
+                    this many heads (default: all heads).
+
+            Returns:
+                tuple:
+                    - the decoder's features of shape `(batch, tgt_len, embed_dim)`
+                    - a dictionary with any model-specific outputs
+            """        
+            prompt_tokens = None
+            prompt_padding_mask = None
+            prompt_kv_list = None
+            if self.args.decoder_prompt:
+                bsz, seq_len = prev_output_tokens.shape[0], prev_output_tokens.shape[1]
+                if self.args.decoder_prompt_type in ("prefix"):
+                    prompt_tokens = torch.arange(
+                        0, self.args.decoder_prompt_length).to(
+                        prev_output_tokens.device)
+                    prompt_tokens = prompt_tokens.unsqueeze(0).expand(bsz, -1)
+                    prompt_padding_mask = torch.zeros_like(prompt_tokens).to(prompt_tokens.device)
+                prompt_kv_list = self.get_decoder_prompt(prompt_tokens)
+            bs, slen = prev_output_tokens.size()
+            if alignment_layer is None:
+                alignment_layer = self.num_layers - 1
+
+            enc: Optional[Tensor] = None
+            padding_mask: Optional[Tensor] = None
+            if encoder_out is not None and len(encoder_out["encoder_out"]) > 0:
+                enc = encoder_out["encoder_out"][0]
+                assert (
+                    enc.size()[1] == bs
+                ), f"Expected enc.shape == (t, {bs}, c) got {enc.shape}"
+            if encoder_out is not None and len(encoder_out["encoder_padding_mask"]) > 0:
+                padding_mask = encoder_out["encoder_padding_mask"][0]
+
+            # bsz, tgt_len = prev_output_tokens.shape
+            
+            patch_images = encoder_out["patch_images"][0]
+            bsz, _, tgt_h, tgt_w = patch_images.shape
+            tgt_h = tgt_h // 16
+            tgt_w = tgt_w // 16
+            tgt_len = tgt_w * tgt_h + 1
+            
+            # token_position_idx = utils.new_arange(prev_output_tokens)
+            old_token_position_idx = torch.arange(1025, dtype=prev_output_tokens.dtype, device=prev_output_tokens.device)
+            old_token_position_idx = old_token_position_idx.unsqueeze(0).expand(bsz, -1)
+            old_tgt_pos_embed = self.embed_seg_positions(old_token_position_idx)
+
+            old_tgt_pos_embed_bos, old_tgt_pos_embed_seg = torch.split(old_tgt_pos_embed, [1, 1024], dim=1)
+            old_tgt_pos_embed_seg = rearrange(old_tgt_pos_embed_seg, 'b (h w) d -> b d h w', h=32, w=32)
+        
+            tgt_pos_embed_seg = F.interpolate(old_tgt_pos_embed_seg, size=(tgt_h, tgt_w), mode='bilinear')
+            tgt_pos_embed_seg = rearrange(tgt_pos_embed_seg, 'b c h w -> b (h w) c')
+            tgt_pos_embed = torch.cat([old_tgt_pos_embed_bos, tgt_pos_embed_seg], dim=1)
+            
+            tgt_pos_embed = tgt_pos_embed[:, :prev_output_tokens.size(1)]
+
+            # self attn position bias
+            self_abs_pos_bias = self.get_pos_info(prev_output_tokens, tgt_pos_embed, use_seg=True)
+
+            # cross attn position bias
+            src_pos_embed = encoder_out['position_embeddings'][0]
+            cross_abs_pos_bias = self.get_pos_info(prev_output_tokens, tgt_pos_embed, src_pos_embed=src_pos_embed, use_seg=True)
+
+            cross_abs_pos_bias = cross_abs_pos_bias.reshape(-1, *cross_abs_pos_bias.size()[-2:])
+
+            all_prev_output_tokens = prev_output_tokens.clone()
+            if incremental_state is not None:
+                prev_output_tokens = prev_output_tokens[:, -1:]
+                cross_abs_pos_bias = cross_abs_pos_bias[:, -1:, :]
+                tgt_pos_embed = tgt_pos_embed[:, -1:, :]
+
+            # embed tokens and positions
+            x = self.embed_scale * self.embed_tokens(prev_output_tokens)
+            
+            if self.quant_noise is not None:
+                x = self.quant_noise(x)
+
+            if self.project_in_dim is not None:
+                x = self.project_in_dim(x)
+
+            if self.entangle_position_embedding is not None and not self.args.disable_entangle:
+                x += tgt_pos_embed
+
+            if self.layernorm_embedding is not None:
+                x = self.layernorm_embedding(x)
+
+            x = self.dropout_module(x)
+
+            # B x T x C -> T x B x C
+            x = x.transpose(0, 1)
+
+            self_attn_padding_mask: Optional[Tensor] = None
+            if self.cross_self_attention or prev_output_tokens.eq(self.padding_idx).any():
+                self_attn_padding_mask = prev_output_tokens.eq(self.padding_idx)
+                if prompt_padding_mask is not None:
+                    self_attn_padding_mask = torch.cat([prompt_padding_mask, self_attn_padding_mask], dim=1)
+
+            # decoder layers
+            attn: Optional[Tensor] = None
+            inner_states: List[Optional[Tensor]] = [x]
+            for idx, layer in enumerate(self.layers):
+                if incremental_state is None and not full_context_alignment:
+                    self_attn_mask = self.buffered_future_mask(x)
+                    if self.args.decoder_prompt:
+                        seq_len, prompt_len = x.size(0), prompt_tokens.size(1)
+                        prompt_mask = torch.zeros([seq_len, prompt_len]).to(x.device)
+                        self_attn_mask = torch.cat([prompt_mask, self_attn_mask], dim=1)
+                else:
+                    self_attn_mask = None
+
+                self_attn_bias = self_abs_pos_bias.clone()
+        
+                old_rel_pos_bias = self.get_seg_rel_pos_bias(all_prev_output_tokens, idx).unsqueeze(0)
+                old_rel_pos_bias = rearrange(old_rel_pos_bias, 'b c hw1 hw2 -> (b hw2) c hw1')
+                old_rel_pos_bias_bos, old_rel_pos_bias_seg = torch.split(old_rel_pos_bias, [1, 1024], dim=-1)
+                
+                old_rel_pos_bias_seg = rearrange(old_rel_pos_bias_seg, 'b c (h w) -> b c h w', h=32, w=32)
+                
+                old_rel_pos_bias_seg = F.interpolate(old_rel_pos_bias_seg, size=(tgt_h, tgt_w), mode='bilinear')
+                
+                old_rel_pos_bias_seg = rearrange(old_rel_pos_bias_seg, 'b c h w -> b c (h w)')
+                old_rel_pos_bias = torch.cat([old_rel_pos_bias_bos, old_rel_pos_bias_seg], dim=-1)
+                
+                old_rel_pos_bias = rearrange(old_rel_pos_bias, '(b hw2) c hw1 -> (b hw1) c hw2', hw1=tgt_len, hw2=1025)
+
+                old_rel_pos_bias_bos, old_rel_pos_bias_seg = torch.split(old_rel_pos_bias, [1, 1024], dim=-1)
+                
+                old_rel_pos_bias_seg = rearrange(old_rel_pos_bias_seg, 'b c (h w) -> b c h w', h=32, w=32)
+                
+                old_rel_pos_bias_seg = F.interpolate(old_rel_pos_bias_seg, size=(tgt_h, tgt_w), mode='bilinear')
+                
+                old_rel_pos_bias_seg = rearrange(old_rel_pos_bias_seg, 'b c h w -> b c (h w)')
+                rel_pos_bias = torch.cat([old_rel_pos_bias_bos, old_rel_pos_bias_seg], dim=-1)
+                
+                rel_pos_bias = rearrange(rel_pos_bias, '(b hw1) c hw2 -> b c hw1 hw2', hw1=tgt_len, hw2=tgt_len)
+                
+                self_attn_bias += rel_pos_bias[..., :prev_output_tokens.size(1), :prev_output_tokens.size(1)]
+                
+                self_attn_bias = self_attn_bias.reshape(-1, *self_attn_bias.size()[-2:])
+                if incremental_state is not None:
+                    self_attn_bias = self_attn_bias[:, -1:, :]
+
+                if self.args.decoder_prompt:
+                    if self.args.decoder_prompt_type != "prompt":
+                        prompt_kv = prompt_kv_list[idx]
+                    else:
+                        if idx == 0:
+                            prompt_kv = prompt_kv_list[idx]
+                        else:
+                            prompt_kv = None
+                else:
+                    prompt_kv = None
+
+                x, layer_attn, _ = layer(
+                    x,
+                    enc,
+                    padding_mask,
+                    incremental_state,
+                    self_attn_mask=self_attn_mask,
+                    self_attn_padding_mask=self_attn_padding_mask,
+                    need_attn=bool((idx == alignment_layer)),
+                    need_head_weights=bool((idx == alignment_layer)),
+                    self_attn_bias=self_attn_bias,
+                    cross_attn_bias=cross_abs_pos_bias,
+                    prompt_kv=prompt_kv
+                )
+                inner_states.append(x)
+                if layer_attn is not None and idx == alignment_layer:
+                    attn = layer_attn.float().to(x)
+
+            if attn is not None:
+                if alignment_heads is not None:
+                    attn = attn[:alignment_heads]
+
+                # average probabilities over heads
+                attn = attn.mean(dim=0)
+
+            if self.layer_norm is not None:
+                x = self.layer_norm(x)
+
+            # T x B x C -> B x T x C
+            x = x.transpose(0, 1)
+
+            if self.project_out_dim is not None:
+                x = self.project_out_dim(x)
+
+            return x, {"attn": [attn], "inner_states": inner_states}
+
 
     def output_layer(self, features):
         """Project features to the vocabulary size."""

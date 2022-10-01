@@ -530,7 +530,7 @@ class TransformerDecoderLayer(nn.Module):
                     saved_state["prev_key_padding_mask"] = prev_attn_state[2]
                 assert incremental_state is not None
                 self.encoder_attn._set_input_buffer(incremental_state, saved_state)
-
+  
             x, attn = self.encoder_attn(
                 query=x,
                 key=encoder_out,

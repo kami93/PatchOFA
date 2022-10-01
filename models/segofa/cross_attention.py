@@ -14,7 +14,7 @@ from fairseq.modules.fairseq_dropout import FairseqDropout
 from fairseq.modules.quant_noise import quant_noise
 from torch import Tensor, nn
 from torch.nn import Parameter
-from einops import rearrange
+
 
 @with_incremental_state
 class MultiheadAttention(nn.Module):
@@ -156,122 +156,8 @@ class MultiheadAttention(nn.Module):
         src_len = tgt_len
         assert embed_dim == self.embed_dim, f"query dim {embed_dim} != {self.embed_dim}"
         assert list(query.size()) == [tgt_len, bsz, embed_dim]
-        
         if key is not None:
             src_len, key_bsz, _ = key.size()
-            
-            if key_bsz != bsz:
-                query = rearrange(query, 's (b t) d -> s b t d', b=key_bsz)
-                saved_state = None
-                
-                assert not self.self_attention
-                assert self.encoder_decoder_attention
-                
-                _q = self.q_proj(query)
-                k = self.k_proj(key)
-                v = self.v_proj(key)
-                      
-                _q = rearrange(_q, 's b t (h d) -> b s t h d', h=self.num_heads)
-                k = rearrange(k, 'l b (h d) -> b l h d', h=self.num_heads)
-                v = rearrange(v, 'l b (h d) -> b l h d', h=self.num_heads)
-                
-                # This is part of a workaround to get around fork/join parallelism
-                # not supporting Optional types.
-                if key_padding_mask is not None and key_padding_mask.dim() == 0:
-                    key_padding_mask = None
-
-                if key_padding_mask is not None:
-                    assert key_padding_mask.size(0) == key_bsz
-                    assert key_padding_mask.size(-1) == k.size(1)
-
-                if prompt_kv is not None:
-                    assert False
-                    # 나중에 다시보기로 함
-                    prompt_k, prompt_v = prompt_kv.split(1)
-                    prompt_k = prompt_k.squeeze(0).reshape(k.size(0), -1, k.size(2))
-                    prompt_v = prompt_v.squeeze(0).reshape(v.size(0), -1, v.size(2))
-                    k = torch.cat([prompt_k, k], dim=1)
-                    v = torch.cat([prompt_v, v], dim=1)
-                
-                attn_weights = torch.einsum('bsthd,blhd->bthsl', _q, k)
-                
-                attn_weights = rearrange(attn_weights, 'b t h s l -> (b t h) s l')
-
-                assert list(attn_weights.size()) == [bsz * self.num_heads, tgt_len, k.size(1)]
-
-                if attn_bias is not None:
-                    attn_weights += attn_bias
-
-                if attn_mask is not None:
-                    assert False
-                    # 나중에 다시보기로 함
-                    attn_mask = attn_mask.unsqueeze(0)
-                    if self.onnx_trace:
-                        attn_mask = attn_mask.repeat(attn_weights.size(0), 1, 1)
-                    attn_weights += attn_mask
-
-                if self_attn_mask is not None:
-                    assert False
-                    # 나중에 다시보기로 함
-                    self_attn_mask = self_attn_mask.unsqueeze(1).expand(bsz, self.num_heads, tgt_len, k.size(1))
-                    attn_weights += self_attn_mask.contiguous().view(bsz * self.num_heads, tgt_len, k.size(1))
-
-                if key_padding_mask is not None:
-                    # don't attend to padding symbols
-                    attn_weights = rearrange(attn_weights,  '(b t h) s l -> b t h s l', b=key_bsz, h=self.num_heads)
-                    
-                    if key_padding_mask.dim() == 2:
-                        key_padding_mask = rearrange(key_padding_mask, 'b l -> b () () () l')
-                    else:
-                        key_padding_mask = rearrange(key_padding_mask, 'b t l -> b t () () l')
-                        
-                    attn_weights = attn_weights.masked_fill(key_padding_mask, float("-inf"))
-                    attn_weights = rearrange(attn_weights,  'b t h s l -> (b t h) s l')
-                attn_weights = rearrange(attn_weights,  '(b t h) s l -> b t h s l', b=key_bsz, h=self.num_heads)
-
-                if before_softmax:
-                    assert False
-                    # 나중에 다시보기로 함
-                    return attn_weights, v
-
-                attn_weights_float = utils.softmax(
-                    attn_weights, dim=-1, onnx_trace=self.onnx_trace
-                )
-                attn_weights = attn_weights_float.type_as(attn_weights)
-                attn_probs = self.dropout_module(attn_weights)
-
-                assert v is not None
-                attn = torch.einsum('bthsl,blhd->bthsd', attn_probs, v)
-                
-                if self.onnx_trace and attn.size(1) == 1:
-                    assert False
-                    # 나중에 다시보기로 함
-                    # when ONNX tracing a single decoder step (sequence length == 1)
-                    # the transpose is a no-op copy before view, thus unnecessary
-                    attn = attn.contiguous().view(tgt_len, bsz, embed_dim)
-
-                if self.c_attn is not None:
-                    attn = rearrange(attn, 'b t h s d -> s (b t) h d')
-                    attn = torch.einsum('tbhd,h->tbhd', attn, self.c_attn)
-                    attn = rearrange(attn, 's (b t) h d -> b t h s d', b=key_bsz)
-
-                attn = rearrange(attn, 'b t h s d -> s (b t) (h d)')
-                
-                attn = self.out_proj(attn)
-                
-                attn_weights: Optional[Tensor] = None
-                if need_weights:
-                    attn_weights = attn_weights_float.view(
-                        -1, self.num_heads, tgt_len, k.size(1)
-                    ).transpose(1, 0)
-                    
-                    
-                    if not need_head_weights:
-                        # average attention weights over heads
-                        attn_weights = attn_weights.mean(dim=0)
-
-                return attn, attn_weights
-
             if not torch.jit.is_scripting():
                 assert key_bsz == bsz
                 assert value is not None

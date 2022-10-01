@@ -13,4 +13,5 @@ from .patch_ofa_custom_criterion_v4_1 import CustomCriterionV4_1
 from .patch_ofa_custom_criterion_v4_2 import CustomCriterionV4_2
 from .patch_ofa_custom_criterion_v4_3 import CustomCriterionV4_3
 
-from .seg_label_smoothed_cross_entropy import SegLabelSmoothedCrossEntropyCriterion
+from .seg_criterion_v1 import SegCriterionV1
+from .seg_criterion_v2 import SegCriterionV2
