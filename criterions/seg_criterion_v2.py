@@ -196,7 +196,7 @@ class SegCriterionV2(FairseqCriterion):
             construct_rdrop_sample(sample)
 
         net_output = model(**sample["net_input"])
-        loss, nll_loss, ntokens, area_intersect, area_pred_label, area_label, area_union = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
+        loss, nll_loss, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union = self.compute_loss(model, net_output, sample, update_num, reduce=reduce)
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
@@ -206,6 +206,10 @@ class SegCriterionV2(FairseqCriterion):
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
+            "area_intersect_lowres": area_intersect_lowres.data,
+            "area_pred_label_lowres": area_pred_label_lowres.data,
+            "area_label_lowres": area_label_lowres.data,
+            "area_union_lowres": area_union_lowres.data,
             "area_intersect": area_intersect.data,
             "area_pred_label": area_pred_label.data,
             "area_label": area_label.data,
@@ -228,35 +232,35 @@ class SegCriterionV2(FairseqCriterion):
             net_output[0][:, :, self.constraint_end:] = -math.inf
         lprobs = model.get_normalized_probs(net_output, log_probs=True) * conf
         
-        
         net_input = sample.get('net_input')
         patch_images = net_input.get('patch_images')
         
         orig_h, orig_w = patch_images.shape[-2:]
-        
         seg_lprob, eos_lprob = lprobs.unbind(2)
-        if self.upscale_lprobs:
-            lprobs_ = rearrange(seg_lprob, 'b (h w) d -> b d h w', h=orig_h//16, w=orig_w//16)
-            lprobs_ = resize(lprobs_, size=(orig_h, orig_w), mode='bilinear', align_corners=False)
-            lprobs = rearrange(lprobs_, 'b d h w -> b (h w) d')
-
-            target = sample["target"]
-        else:
-            lprobs = seg_lprob
-            target = sample["downsampled_target"]
-
+        lprobs_lowres = seg_lprob
+        target_lowres = sample["downsampled_target"]
+        
+        lprobs_ = rearrange(seg_lprob, 'b (h w) d -> b d h w', h=orig_h//16, w=orig_w//16)
+        lprobs_ = resize(lprobs_, size=(orig_h, orig_w), mode='bilinear', align_corners=False)
+        lprobs = rearrange(lprobs_, 'b d h w -> b (h w) d')
+        target = sample["target"]
         if self.ignore_eos:
+            bsz, seq_len = target_lowres.size()
+            eos_indices = target_lowres.eq(self.task.tgt_dict.eos())
+            target_lowres = target_lowres[~eos_indices].reshape(bsz, seq_len-1)
+            
+            
+            
             bsz, seq_len = target.size()
             eos_indices = target.eq(self.task.tgt_dict.eos())
-            
             target = target[~eos_indices].reshape(bsz, seq_len-1)
 
-        return lprobs, target, constraint_masks
+        return lprobs, target, lprobs_lowres, target_lowres, constraint_masks
 
     def compute_loss(self, model, net_output, sample, update_num, reduce=True):
-        lprobs, target, constraint_masks = self.get_lprobs_and_target(model, net_output, sample)
-        if constraint_masks is not None:
-            constraint_masks = constraint_masks[target != self.padding_idx]
+        lprobs, target, lprobs_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample)
+        # if constraint_masks is not None:
+        #     constraint_masks = constraint_masks[target != self.padding_idx]
         
         bsz = sample['net_input']['patch_images'].size(0)
         assert self.ignore_eos
@@ -266,6 +270,39 @@ class SegCriterionV2(FairseqCriterion):
         target = target[mask]
         target = target - self.seg_id_offset
         
+        mask_lowres = torch.logical_and(target_lowres != self.padding_idx, target_lowres != (self.seg_id_offset+150))
+        lprobs_lowres = lprobs_lowres[mask_lowres]
+        target_lowres = target_lowres[mask_lowres]
+        target_lowres = target_lowres - self.seg_id_offset
+        
+        if self.upscale_lprobs:
+            lprobs_train = lprobs
+            target_train = target
+        else:
+            lprobs_train = lprobs_lowres
+            target_train = target_lowres
+                
+        loss, nll_loss, ntokens = label_smoothed_nll_loss(
+            lprobs_train,
+            target_train,
+            self.eps,
+            update_num,
+            reduce=reduce,
+            drop_worst_ratio=self.drop_worst_ratio,
+            drop_worst_after=self.drop_worst_after,
+            use_rdrop=self.use_rdrop,
+            reg_alpha=self.reg_alpha,
+            constraint_masks=constraint_masks,
+            constraint_start=self.constraint_start,
+            constraint_end=self.constraint_end
+        )
+        
+        area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(lprobs_lowres, target_lowres)
+        area_intersect, area_pred_label, area_label, area_union = self.compute_metric(lprobs, target)
+        
+        return loss, nll_loss, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
+
+    def compute_metric(self, lprobs, target):
         num_classes = lprobs.size(-1)
         pred_label = lprobs.argmax(-1)
 
@@ -278,21 +315,7 @@ class SegCriterionV2(FairseqCriterion):
             target.float(), bins=(num_classes), min=0, max=num_classes - 1)
         area_union = area_pred_label + area_label - area_intersect
         
-        loss, nll_loss, ntokens = label_smoothed_nll_loss(
-            lprobs.view(-1, lprobs.size(-1)),
-            target.view(-1),
-            self.eps,
-            update_num,
-            reduce=reduce,
-            drop_worst_ratio=self.drop_worst_ratio,
-            drop_worst_after=self.drop_worst_after,
-            use_rdrop=self.use_rdrop,
-            reg_alpha=self.reg_alpha,
-            constraint_masks=constraint_masks,
-            constraint_start=self.constraint_start,
-            constraint_end=self.constraint_end
-        )
-        return loss, nll_loss, ntokens, area_intersect, area_pred_label, area_label, area_union
+        return area_intersect, area_pred_label, area_label, area_union
 
     def compute_accuracy(self, model, net_output, sample):
         lprobs, target = self.get_lprobs_and_target(model, net_output, sample)
@@ -317,9 +340,18 @@ class SegCriterionV2(FairseqCriterion):
         area_label_sum = sum(log.get("area_label", 0) for log in logging_outputs)
         area_union_sum = sum(log.get("area_union", 0) for log in logging_outputs)
 
+        area_intersect_lowres_sum = sum(log.get("area_intersect_lowres", 0) for log in logging_outputs)
+        area_pred_label_lowres_sum = sum(log.get("area_pred_label_lowres", 0) for log in logging_outputs)
+        area_label_lowres_sum = sum(log.get("area_label_lowres", 0) for log in logging_outputs)
+        area_union_lowres_sum = sum(log.get("area_union_lowres", 0) for log in logging_outputs)
+
         aacc = area_intersect_sum.sum() / area_pred_label_sum.sum()
         miou = (area_intersect_sum / (area_union_sum + 1e-9)).mean()
         macc = (area_intersect_sum / (area_label_sum + 1e-9)).mean()
+
+        aacc_lowres = area_intersect_lowres_sum.sum() / area_pred_label_lowres_sum.sum()
+        miou_lowres = (area_intersect_lowres_sum / (area_union_lowres_sum + 1e-9)).mean()
+        macc_lowres = (area_intersect_lowres_sum / (area_label_lowres_sum + 1e-9)).mean()
 
         metrics.log_scalar(
             "loss", loss_sum / sample_size, sample_size, round=3
@@ -340,13 +372,22 @@ class SegCriterionV2(FairseqCriterion):
             "sample_size", sample_size, 1, round=3
         )
         metrics.log_scalar(
-            "aAcc", aacc / sample_size, 1, round=3
+            "aAcc", aacc, 1, round=3
         )
         metrics.log_scalar(
-            "mIoU", miou / sample_size, 1, round=3
+            "mIoU", miou, 1, round=3
         )
         metrics.log_scalar(
-            "mAcc", macc / sample_size, 1, round=3
+            "mAcc", macc, 1, round=3
+        )
+        metrics.log_scalar(
+            "aAcc_lowres", aacc_lowres, 1, round=3
+        )
+        metrics.log_scalar(
+            "mIoU_lowres", miou_lowres, 1, round=3
+        )
+        metrics.log_scalar(
+            "mAcc_lowres", macc_lowres, 1, round=3
         )
 
         total = utils.item(sum(log.get("total", 0) for log in logging_outputs))

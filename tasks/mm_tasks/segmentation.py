@@ -162,8 +162,6 @@ class SegmentationTask(OFATask):
         model.eval()
         loss, sample_size, logging_output = criterion(model, sample)
 
-        # model.eval()
-
         # hyps, refs = self._inference(self.sequence_generator, sample, model)
 
         # pred_label = hyps
