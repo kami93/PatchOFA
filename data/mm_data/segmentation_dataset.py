@@ -9,6 +9,7 @@ import logging
 import warnings
 import string
 import cv2
+import random
 
 import numpy as np
 import torch
@@ -34,6 +35,31 @@ warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
+CLASSES = [
+    'wall', 'building', 'sky', 'floor', 'tree', 'ceiling', 'road', 'bed ',
+    'windowpane', 'grass', 'cabinet', 'sidewalk', 'person', 'earth',
+    'door', 'table', 'mountain', 'plant', 'curtain', 'chair', 'car',
+    'water', 'painting', 'sofa', 'shelf', 'house', 'sea', 'mirror', 'rug',
+    'field', 'armchair', 'seat', 'fence', 'desk', 'rock', 'wardrobe',
+    'lamp', 'bathtub', 'railing', 'cushion', 'base', 'box', 'column',
+    'signboard', 'chest of drawers', 'counter', 'sand', 'sink',
+    'skyscraper', 'fireplace', 'refrigerator', 'grandstand', 'path',
+    'stairs', 'runway', 'case', 'pool table', 'pillow', 'screen door',
+    'stairway', 'river', 'bridge', 'bookcase', 'blind', 'coffee table',
+    'toilet', 'flower', 'book', 'hill', 'bench', 'countertop', 'stove',
+    'palm', 'kitchen island', 'computer', 'swivel chair', 'boat', 'bar',
+    'arcade machine', 'hovel', 'bus', 'towel', 'light', 'truck', 'tower',
+    'chandelier', 'awning', 'streetlight', 'booth', 'television receiver',
+    'airplane', 'dirt track', 'apparel', 'pole', 'land', 'bannister',
+    'escalator', 'ottoman', 'bottle', 'buffet', 'poster', 'stage', 'van',
+    'ship', 'fountain', 'conveyer belt', 'canopy', 'washer', 'plaything',
+    'swimming pool', 'stool', 'barrel', 'basket', 'waterfall', 'tent',
+    'bag', 'minibike', 'cradle', 'oven', 'ball', 'food', 'step', 'tank',
+    'trade name', 'microwave', 'pot', 'animal', 'bicycle', 'lake',
+    'dishwasher', 'screen', 'blanket', 'sculpture', 'hood', 'sconce',
+    'vase', 'traffic light', 'tray', 'ashcan', 'fan', 'pier', 'crt screen',
+    'plate', 'monitor', 'bulletin board', 'shower', 'radiator', 'glass',
+    'clock', 'flag']
 
 def collate(samples, pad_idx, eos_idx):
     if len(samples) == 0:
@@ -69,6 +95,18 @@ def collate(samples, pad_idx, eos_idx):
     else:
         ntokens = src_lengths.sum().item()
 
+
+    text2seg_src_tokens = merge("text2seg_source")
+    text2seg_src_lengths = torch.LongTensor([s["text2seg_source"].ne(pad_idx).long().sum() for s in samples])
+
+    text2seg_prev_output_tokens = None
+    text2seg_target = None
+    if samples[0].get("text2seg_target", None) is not None:
+        text2seg_target = merge("text2seg_target")
+
+        if samples[0].get("text2seg_prev_output_tokens", None) is not None:
+            text2seg_prev_output_tokens = merge("text2seg_prev_output_tokens")
+
     batch = {
         "id": id,
         "nsentences": len(samples),
@@ -80,8 +118,14 @@ def collate(samples, pad_idx, eos_idx):
             "patch_masks": patch_masks,
             "prev_output_tokens": prev_output_tokens
         },
+        "aux_input": {
+            "src_tokens": text2seg_src_tokens,
+            "src_lengths": text2seg_src_lengths,
+            "prev_output_tokens": text2seg_prev_output_tokens,
+        },
         "target": target,
-        "downsampled_target": downsampled_target
+        "downsampled_target": downsampled_target,
+        "text2seg_target": text2seg_target
     }
 
     return batch
@@ -138,9 +182,29 @@ class SegmentationDataset(OFADataset):
             self.downsample_gt_seg = transforms.Resize(32, transforms.InterpolationMode.NEAREST)
             
         self.prompt = ' what is the segmentation of the image?'
+        
+        self.id2seg = [f'<seg_{idx}>' for idx in range(151)]
+        self.seg2code = self.encode_text(" ".join(self.id2seg), use_bpe=False)
 
-        id2seg = " ".join([f'<seg_{idx}>' for idx in range(151)])
-        self.seg2code = self.encode_text(id2seg, use_bpe=False)
+        self.pos_tgt_item = self.encode_text(" yes")
+        self.neg_tgt_item = self.encode_text(" no")
+
+    def encode_text(self, text, length=None, append_bos=False, append_eos=False, use_bpe=True):
+        line = [self.bpe.encode(' {}'.format(word.strip())) if not word.startswith('<seg_') else word for word in text.strip().split()]
+        line = ' '.join(line)
+        
+        s = self.tgt_dict.encode_line(
+            line=line,
+            add_if_not_exist=False,
+            append_eos=False
+        ).long()
+        if length is not None:
+            s = s[:length]
+        if append_bos:
+            s = torch.cat([self.bos_item, s])
+        if append_eos:
+            s = torch.cat([s, self.eos_item])
+        return s
 
     def __getitem__(self, index):
         image, segmentation, uniq_id = self.dataset[index]
@@ -221,10 +285,9 @@ class SegmentationDataset(OFADataset):
         seg_ids_downsampled = self.seg2code[gt_semantic_seg_downsampled.flatten()]
         
         prev_output_item = torch.cat([self.bos_item, seg_ids_downsampled])
-        
         downsampled_target = torch.cat([seg_ids_downsampled, self.eos_item])
         target = torch.cat([seg_ids, self.eos_item])
-            
+
         example = {
             "id": uniq_id,
             "source": src_item,
@@ -234,7 +297,49 @@ class SegmentationDataset(OFADataset):
             "downsampled_target": downsampled_target,
             "prev_output_tokens": prev_output_item
         }
+
+        rand0, rand1 = np.random.choice(150, size=2, replace=False)
+        prob = random.random()
+        if prob >= 0.5:
+            # Make Positive Pair
+            text = CLASSES[rand0]
+            seg = self.id2seg[rand0]
+            pos_pair = [text, seg]
+            pos_src_item = torch.cat([self.bos_item, self.get_src_item_given_pair(pos_pair), self.eos_item])
+            
+            example["text2seg_source"] = pos_src_item
+            
+            pos_prev_output_item = pos_src_item[:-1].clone()
+            pos_target_item = torch.cat([pos_prev_output_item[1:], self.pos_tgt_item])
+            pos_target_item[:-1] = self.tgt_dict.pad()
+            
+            example["text2seg_target"] = pos_target_item
+            example["text2seg_prev_output_tokens"] = pos_prev_output_item
+            
+        else:
+            # Make Negative Pair
+            text = CLASSES[rand0]
+            seg = self.id2seg[rand1]
+            neg_pair = [text, seg]
+            neg_src_item = torch.cat([self.bos_item, self.get_src_item_given_pair(neg_pair), self.eos_item])
+            
+            example["text2seg_source"] = neg_src_item
+            
+            neg_prev_output_item = neg_src_item[:-1].clone()
+            neg_target_item = torch.cat([neg_prev_output_item[1:], self.neg_tgt_item])
+            neg_target_item[:-1] = self.tgt_dict.pad()
+            
+            example["text2seg_target"] = neg_target_item
+            example["text2seg_prev_output_tokens"] = neg_prev_output_item
+        
         return example
+
+    def get_src_item_given_pair(self, pair):
+        np.random.shuffle(pair)
+        src_item = self.encode_text(
+            ' does text1 " {} " and text2 " {} " have the same semantics?'.format(pair[0], pair[1]),
+        )
+        return src_item
 
     def collater(self, samples, pad_to_length=None):
         """Merge a list of samples to form a mini-batch.

@@ -83,6 +83,7 @@ class SegOFAModel(TransformerModel):
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
         encoder_only: bool = False,
+        text2seg_decoding: bool = False
     ):
         if classification_head_name is not None:
             features_only = True
@@ -110,6 +111,7 @@ class SegOFAModel(TransformerModel):
             alignment_heads=alignment_heads,
             src_lengths=src_lengths,
             return_all_hiddens=return_all_hiddens,
+            text2seg_decoding=text2seg_decoding,
         )
 
         pad = self.encoder.padding_idx
