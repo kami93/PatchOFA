@@ -345,14 +345,6 @@ class SegCriterionV2(FairseqCriterion):
         area_label_lowres_sum = sum(log.get("area_label_lowres", 0) for log in logging_outputs)
         area_union_lowres_sum = sum(log.get("area_union_lowres", 0) for log in logging_outputs)
 
-        aacc = area_intersect_sum.sum() / area_pred_label_sum.sum()
-        miou = (area_intersect_sum / (area_union_sum + 1e-9)).mean()
-        macc = (area_intersect_sum / (area_label_sum + 1e-9)).mean()
-
-        aacc_lowres = area_intersect_lowres_sum.sum() / area_pred_label_lowres_sum.sum()
-        miou_lowres = (area_intersect_lowres_sum / (area_union_lowres_sum + 1e-9)).mean()
-        macc_lowres = (area_intersect_lowres_sum / (area_label_lowres_sum + 1e-9)).mean()
-
         metrics.log_scalar(
             "loss", loss_sum / sample_size, sample_size, round=3
         )
@@ -371,24 +363,74 @@ class SegCriterionV2(FairseqCriterion):
         metrics.log_scalar(
             "sample_size", sample_size, 1, round=3
         )
-        metrics.log_scalar(
-            "aAcc", aacc, 1, round=3
+        metrics.log_scalar_sum(
+            "_area_intersect", area_intersect_sum, 1
         )
-        metrics.log_scalar(
-            "mIoU", miou, 1, round=3
+        metrics.log_scalar_sum(
+            "_area_pred_label", area_pred_label_sum, 1
         )
-        metrics.log_scalar(
-            "mAcc", macc, 1, round=3
+        metrics.log_scalar_sum(
+            "_area_label", area_label_sum, 1
         )
-        metrics.log_scalar(
-            "aAcc_lowres", aacc_lowres, 1, round=3
+        metrics.log_scalar_sum(
+            "_area_union", area_union_sum, 1
         )
-        metrics.log_scalar(
-            "mIoU_lowres", miou_lowres, 1, round=3
+        metrics.log_scalar_sum(
+            "_area_intersect_lowres", area_intersect_lowres_sum, 1
         )
-        metrics.log_scalar(
-            "mAcc_lowres", macc_lowres, 1, round=3
+        metrics.log_scalar_sum(
+            "_area_pred_label_lowres", area_pred_label_lowres_sum, 1
         )
+        metrics.log_scalar_sum(
+            "_area_label_lowres", area_label_lowres_sum, 1
+        )
+        metrics.log_scalar_sum(
+            "_area_union_lowres", area_union_lowres_sum, 1
+        )
+
+        def compute_all_acc(meters):
+            all_acc = meters['_area_intersect'].sum.sum() / meters['_area_pred_label'].sum.sum()
+            all_acc = all_acc if isinstance(all_acc, float) else all_acc.item()
+            
+            return round(all_acc, 4)
+
+        def compute_mean_iou(meters):
+            miou = torch.nanmean(meters['_area_intersect'].sum / (meters['_area_union'].sum))
+            miou = miou if isinstance(miou, float) else miou.item()
+            
+            return round(miou, 4)
+
+        def compute_mean_acc(meters):
+            macc = torch.nanmean(meters['_area_intersect'].sum / (meters['_area_label'].sum)) # nanmean
+            macc = macc if isinstance(macc, float) else macc.item()
+            
+            return round(macc, 4)
+
+        def compute_all_acc_lowres(meters):
+            all_acc = meters['_area_intersect_lowres'].sum.sum() / meters['_area_pred_label_lowres'].sum.sum()
+            all_acc = all_acc if isinstance(all_acc, float) else all_acc.item()
+            
+            return round(all_acc, 4)
+
+        def compute_mean_iou_lowres(meters):
+            miou = torch.nanmean(meters['_area_intersect_lowres'].sum / (meters['_area_union_lowres'].sum))
+            miou = miou if isinstance(miou, float) else miou.item()
+            
+            return round(miou, 4)
+
+        def compute_mean_acc_lowres(meters):
+            macc = torch.nanmean(meters['_area_intersect_lowres'].sum / (meters['_area_label_lowres'].sum))
+            macc = macc if isinstance(macc, float) else macc.item()
+            
+            return round(macc, 4)
+
+        metrics.log_derived("aAcc", compute_all_acc)
+        metrics.log_derived("mIoU", compute_mean_iou)
+        metrics.log_derived("mAcc", compute_mean_acc)
+
+        metrics.log_derived("aAcc_lowres", compute_all_acc_lowres)
+        metrics.log_derived("mIoU_lowres", compute_mean_iou_lowres)
+        metrics.log_derived("mAcc_lowres", compute_mean_acc_lowres)
 
         total = utils.item(sum(log.get("total", 0) for log in logging_outputs))
         if total > 0:
