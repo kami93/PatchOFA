@@ -181,10 +181,10 @@ class SegmentationTask(OFATask):
         #     label.float(), bins=(num_classes), min=0, max=num_classes - 1)
         # area_union = area_pred_label + area_label - area_intersect
 
-        # logging_output["_area_intersect"] = area_intersect
-        # logging_output["_area_pred_label"] = area_pred_label
-        # logging_output["_area_label"] = area_label
-        # logging_output["_area_union"] = area_union
+        # logging_output["_area_intersect_infer"] = area_intersect
+        # logging_output["_area_pred_label_infer"] = area_pred_label
+        # logging_output["_area_label_infer"] = area_label
+        # logging_output["_area_union_infer"] = area_union
 
         return loss, sample_size, logging_output
 
@@ -199,25 +199,25 @@ class SegmentationTask(OFATask):
             return result
 
         def compute_all_acc(meters):
-            all_acc = meters['_area_intersect'].sum.sum() / meters['_area_pred_label'].sum.sum()
+            all_acc = meters['_area_intersect_infer'].sum.sum() / meters['_area_pred_label_infer'].sum.sum()
             all_acc = all_acc if isinstance(all_acc, float) else all_acc.item()
             return round(all_acc, 4)
 
         def compute_mean_iou(meters):
-            miou = (meters['_area_intersect'].sum / (meters['_area_union'].sum + 1e-9)).mean()
+            miou = torch.nanmean(meters['_area_intersect_infer'].sum / (meters['_area_union_infer'].sum))
             miou = miou if isinstance(miou, float) else miou.item()
             return round(miou, 4)
 
         def compute_mean_acc(meters):
-            macc = (meters['_area_intersect'].sum / (meters['_area_label'].sum + 1e-9)).mean()
+            macc = torch.nanmean(meters['_area_intersect_infer'].sum / (meters['_area_label_infer'].sum))
             macc = macc if isinstance(macc, float) else macc.item()
             return round(macc, 4)
 
-        if "_area_union" in logging_outputs[0]: # check if valid
-            metrics.log_scalar("_area_intersect", sum_logs("_area_intersect"))
-            metrics.log_scalar("_area_pred_label", sum_logs("_area_pred_label"))
-            metrics.log_scalar("_area_label", sum_logs("_area_label"))
-            metrics.log_scalar("_area_union", sum_logs("_area_union"))
+        if "_area_union_infer" in logging_outputs[0]: # check if valid
+            metrics.log_scalar_sum("_area_intersect_infer", sum_logs("_area_intersect_infer"))
+            metrics.log_scalar_sum("_area_pred_label_infer", sum_logs("_area_pred_label_infer"))
+            metrics.log_scalar_sum("_area_label_infer", sum_logs("_area_label_infer"))
+            metrics.log_scalar_sum("_area_union_infer", sum_logs("_area_union_infer"))
 
             metrics.log_derived("infer_aAcc", compute_all_acc)
             metrics.log_derived("infer_mIoU", compute_mean_iou)
