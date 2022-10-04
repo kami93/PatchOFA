@@ -69,26 +69,14 @@ class SegCriterionV3Config(FairseqDataclass):
         default='true',
         metadata={"help": "true | fasle"}
     )
-    loss_weight: float = field(
-        default=1.0, metadata={"help": "labeled loss weight"}
-    )
     unlabeled_threshold: float = field(
         default=0.0, metadata={"help": "labeled loss weight"}
-    )
-    loss_type: str = field(
-        default='cross_entropy', metadata={"help": "cross_entropy | kld"}
     )
     teacher_temperature: float = field(
         default=0.1, metadata={"help": "teacher temperature for loss"}
     )
     student_temperature: float = field(
         default=0.1, metadata={"help": "teacher temperature for loss"}
-    )
-    use_centering: str = field(
-        default='true', metadata={"help": "whether to apply logit centering"}
-    )
-    centering_update_freq: int = field(
-        default=1, metadata={"help": "update frequency for logit center."}
     )
     alpha: float = field(
         default=0.5, metadata={"help": "alpha weight"}
@@ -191,11 +179,8 @@ class SegCriterionV3(FairseqCriterion):
         constraint_range=None,
         upscale_lprobs='true',
         unsupervised_segmentation='true',
-        loss_weight=1.0,
         teacher_temperature=0.1,
         student_temperature=0.1,
-        use_centering='false',
-        centering_update_freq=1,
         alpha=0.5,
         unlabeled_threshold=0.0
     ):
@@ -211,14 +196,11 @@ class SegCriterionV3(FairseqCriterion):
         self.reg_alpha = reg_alpha
         self.sample_patch_num = sample_patch_num
 
-        self.loss_weight = loss_weight
         self.teacher_temperature = teacher_temperature
         self.student_temperature = student_temperature
-        self.centering_update_freq = centering_update_freq
         self.alpha = alpha
         self.unlabeled_threshold = unlabeled_threshold
             
-        self.use_centering = resolve_str_true_false(use_centering)
         self.upscale_lprobs = resolve_str_true_false(upscale_lprobs)
         self.unsupervised_segmentation = resolve_str_true_false(unsupervised_segmentation)
         
@@ -240,14 +222,15 @@ class SegCriterionV3(FairseqCriterion):
         """
         if self.use_rdrop:
             construct_rdrop_sample(sample)
-
-        labeled_output = model(**sample["aux_input"], text2seg_decoding=True)
         
-        labeled_loss = 0.0
         if self.alpha != 1.0:
+            net_output = model(**sample["net_input"], aux_input=sample["aux_input"])
+            labeled_output = net_output[1].get("aux_output")
             labeled_loss = self.compute_labeled_loss(model, labeled_output, sample, update_num, reduce=reduce)
-        
-        net_output = model(**sample["net_input"])
+            
+        else:
+            net_output = model(**sample["net_input"])
+            labeled_loss = net_output[0].new_zeros(size=(1, ))
         
         if self.unsupervised_segmentation:
             compute_seg_loss = self.compute_unlabled_kld_loss
@@ -262,6 +245,7 @@ class SegCriterionV3(FairseqCriterion):
         )
         logging_output = {
             "loss": loss.data,
+            "labeled_loss": labeled_loss.data,
             "nll_loss": nll_loss.data,
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
@@ -479,6 +463,7 @@ class SegCriterionV3(FairseqCriterion):
         """Aggregate logging outputs from data parallel training."""
         loss_sum = sum(log.get("loss", 0) for log in logging_outputs)
         nll_loss_sum = sum(log.get("nll_loss", 0) for log in logging_outputs)
+        labeled_loss_sum = sum(log.get("labeled_loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
@@ -495,6 +480,9 @@ class SegCriterionV3(FairseqCriterion):
 
         metrics.log_scalar(
             "loss", loss_sum / sample_size, sample_size, round=3
+        )
+        metrics.log_scalar(
+            "labeled_loss", labeled_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_scalar(
             "nll_loss", nll_loss_sum / sample_size, ntokens, round=3

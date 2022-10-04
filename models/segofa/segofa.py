@@ -6,7 +6,7 @@
 """
 OFA
 """
-from typing import Optional
+from typing import Optional, Dict
 
 import logging
 
@@ -83,7 +83,7 @@ class SegOFAModel(TransformerModel):
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
         encoder_only: bool = False,
-        text2seg_decoding: bool = False
+        aux_input: Optional[dict] = None,
     ):
         if classification_head_name is not None:
             features_only = True
@@ -111,7 +111,7 @@ class SegOFAModel(TransformerModel):
             alignment_heads=alignment_heads,
             src_lengths=src_lengths,
             return_all_hiddens=return_all_hiddens,
-            text2seg_decoding=text2seg_decoding,
+            text2seg_decoding=False,
         )
 
         pad = self.encoder.padding_idx
@@ -129,6 +129,21 @@ class SegOFAModel(TransformerModel):
                     break
     
         extra['encoder_returns'] = encoder_out
+
+        if aux_input is not None:
+            aux_encoder_out = self.encoder(
+                aux_input.get("src_tokens"),
+                src_lengths=aux_input.get("src_lengths")
+            )
+
+            aux_output = self.decoder(
+                aux_input.get("prev_output_tokens"),
+                encoder_out=aux_encoder_out,
+                src_lengths=aux_input.get("src_lengths"),
+                text2seg_decoding=True,
+            )
+            
+            extra['aux_output'] = aux_output
 
         return x, extra
 
