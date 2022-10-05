@@ -891,8 +891,11 @@ class TransformerEncoder(FairseqEncoder):
             patch_masks = patch_masks + offset.unsqueeze(1)
             patch_masks = patch_masks[:, :-1].flatten()
 
-            image_embed = self.embed_tokens_bag(patch_images, offsets=patch_masks)
-            image_embed = rearrange(image_embed, '(b h w) d -> b d h w', b=bsz, h=32, w=32)
+            # 20221006 수정사항
+            # text 임베딩에 gradient 통과시키지 않음
+            with torch.no_grad():
+                image_embed = self.embed_tokens_bag(patch_images, offsets=patch_masks)
+                image_embed = rearrange(image_embed, '(b h w) d -> b d h w', b=bsz, h=32, w=32)
             
             h, w = image_embed.shape[-2:]
             image_num_patches = h * w
@@ -926,7 +929,11 @@ class TransformerEncoder(FairseqEncoder):
 
         # embed tokens and positions
         if token_embeddings is None:
-            token_embeddings = self.embed_tokens(src_tokens)
+            # 20221006 수정사항
+            # text 임베딩에 gradient 통과시키지 않음
+            with torch.no_grad():
+                token_embeddings = self.embed_tokens(src_tokens)
+                
         x = embed = self.embed_scale * token_embeddings
         if self.entangle_position_embedding and pos_embed is not None:
             x += pos_embed
@@ -2443,7 +2450,15 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
             # embed tokens and positions
             bos = prev_output_tokens[:, :1]
-            x = torch.cat([self.embed_tokens(bos), encoder_out["image_embed_before_scale"][0]], dim=1)
+            
+            image_embed_before_scale = encoder_out["image_embed_before_scale"][0]
+            # 20221006 수정사항
+            # "입력단" 쪽으로 흐르는 그래디언트는 막아줘서 ResNet 의 Collapse 방지
+            image_embed_before_scale = image_embed_before_scale.detach() # STOP_GRAD
+            
+            # 여기서는 self.embed_tokens(bos) 을 그냥 놔뒀는데,
+            # 어차피 unlabeled loss 의 학습이 시작될 때 embedding 전체를 프리즈시키기 때문에 bos 관련해서는 아무것도 안해줘도 됨.
+            x = torch.cat([self.embed_tokens(bos), image_embed_before_scale], dim=1)
             x = x * self.embed_scale
             
             if self.quant_noise is not None:
@@ -2643,7 +2658,13 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
             # embed tokens and positions
             bos = prev_output_tokens[:, :1]
-            x = torch.cat([self.embed_tokens(bos), encoder_out["image_embed_before_scale"][0]], dim=1)
+            
+            # 20221006 수정사항
+            # labeled loss 계산할 때, text 임베딩에 gradient 통과시키지 않음
+            with torch.no_grad():
+                embeded_bos = self.embed_tokens(bos)
+            
+            x = torch.cat([embeded_bos, encoder_out["image_embed_before_scale"][0]], dim=1)
             x = x * self.embed_scale
             
             if self.quant_noise is not None:
@@ -2736,8 +2757,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 x = self.project_out_dim(x)
 
             return x, {"attn": [attn], "inner_states": inner_states}
-
-
 
     def extract_features_scriptable_old(
             self,

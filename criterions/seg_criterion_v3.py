@@ -21,6 +21,8 @@ from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.dataclass import FairseqDataclass
 from omegaconf import II
 
+import logging
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SegCriterionV3Config(FairseqDataclass):
@@ -85,8 +87,16 @@ class SegCriterionV3Config(FairseqDataclass):
     use_centering: str = field(
         default='true', metadata={"help": "whether to apply logit centering"}
     )
-    centering_update_freq: int = field(
-        default=1, metadata={"help": "update frequency for logit center."}
+    criterion_update_freq: int = field(
+        default=1, metadata={"help": "update frequency used in this criterion (e.g., for updating logit center)."}
+    )
+    hard_rampup_iter: int = field(
+        default=0, metadata={
+            "help": "Hard rampup (imediately turn on alpha coefficient) at this iteration. ``effective iteration'' (1 iter per N update-freq) is used."}
+    )
+    freeze_embedding_iter: int = field(
+        default=-1, metadata={
+            "help": "Freeze the token embedding after this iteration (ignored if -1). ``effective iteration'' (1 iter per N update-freq) is used."}
     )
     
 def resolve_str_true_false(x):
@@ -191,7 +201,9 @@ class SegCriterionV3(FairseqCriterion):
         alpha=0.5,
         unlabeled_threshold=0.0,
         use_centering='true',
-        centering_update_freq=1,
+        criterion_update_freq=1,
+        hard_rampup_iter=0,
+        freeze_embedding_iter=-1,
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -209,7 +221,13 @@ class SegCriterionV3(FairseqCriterion):
         self.student_temperature = student_temperature
         self.alpha = alpha
         self.unlabeled_threshold = unlabeled_threshold
-        self.centering_update_freq = centering_update_freq
+        self.criterion_update_freq = criterion_update_freq
+        
+        self.hard_rampup_iter = hard_rampup_iter
+        self.freeze_embedding_iter = freeze_embedding_iter
+        
+        self.iter = -1
+        self.effective_iter = -1 # effective_iter = iter // criterion_update_freq
         
         self.use_centering = resolve_str_true_false(use_centering)
         self.upscale_lprobs = resolve_str_true_false(upscale_lprobs)
@@ -229,7 +247,6 @@ class SegCriterionV3(FairseqCriterion):
             self.register_buffer("center_accumulation", torch.zeros(size=(1, output_classes)), persistent=False) # tmp buffer for accumulated updates. # self.center_accumulation
             self.center_momentum = 0.9
             self.register_buffer("center_batch_size", torch.zeros(size=(1, )), persistent=False) # tmp buffer for accumulated updates. # self.center_batch_size
-            self.iter = 0
 
     def forward(self, model, sample, update_num=0, reduce=True):
         """Compute the loss for the given sample.
@@ -239,6 +256,38 @@ class SegCriterionV3(FairseqCriterion):
         2) the sample size, which is used as the denominator for the gradient
         3) logging outputs to display while training
         """
+        # 20221006 수정사항
+        # count effective iterations given iter and criterion_update_freq
+        self.iter += 1
+        self.effective_iter = self.iter // self.criterion_update_freq
+        
+        # 20221006 수정사항
+        # hard ramp-up 적용
+        if self.effective_iter < self.hard_rampup_iter:
+            if (self.iter == 0) and (self.hard_rampup_iter != 0):
+                logger.info(f"Set alpha_coefficient == 0.0 until hard_rampup iterations {self.hard_rampup_iter}")
+            alpha_coefficient = 0.0
+        else:
+            if (self.effective_iter == self.hard_rampup_iter) and (self.iter % self.criterion_update_freq == 0) and (self.hard_rampup_iter != 0):
+                logger.info(f"Hard ramp-up alpha_coefficient == {self.alpha} as effective_iter reached {self.hard_rampup_iter} (raw iter == {self.iter})")
+            alpha_coefficient = self.alpha
+        
+        # 20221006 수정사항
+        # embedding freeze iteration 기능 적용
+        if (self.freeze_embedding_iter == -1) or (self.effective_iter < self.freeze_embedding_iter):
+            pass
+        else:
+            if (self.effective_iter == self.freeze_embedding_iter) and (self.iter % self.criterion_update_freq == 0):
+                logger.info(f"Freezing embeddings as effective_iter reached {self.freeze_embedding_iter} (raw iter == {self.iter})")
+            model.encoder.embed_tokens.weight.requires_grad_(False)
+            model.decoder.embed_tokens.weight.requires_grad_(False)
+        
+        if self.use_centering:
+            # send centering buffers to a gpu device, if applicable
+            self.center = self.center.to('cuda')
+            self.center_accumulation = self.center_accumulation.to('cuda')
+            self.center_batch_size = self.center_batch_size.to('cuda')
+            
         if self.use_rdrop:
             construct_rdrop_sample(sample)
         
@@ -258,7 +307,7 @@ class SegCriterionV3(FairseqCriterion):
                 
         seg_loss, nll_loss, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce)
         
-        loss = (1.0 - self.alpha) * labeled_loss + self.alpha * seg_loss
+        loss = (1.0 - alpha_coefficient) * labeled_loss + alpha_coefficient * seg_loss
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
@@ -266,6 +315,7 @@ class SegCriterionV3(FairseqCriterion):
             "loss": loss.data,
             "labeled_loss": labeled_loss.data,
             "nll_loss": nll_loss.data,
+            "alpha_coefficient": alpha_coefficient, # 20221006 수정사항: alpha coefficient 로깅
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
@@ -358,7 +408,6 @@ class SegCriterionV3(FairseqCriterion):
 
         if self.use_centering:
             self.update_center(logits)
-            self.iter += 1
 
         lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
 
@@ -397,7 +446,6 @@ class SegCriterionV3(FairseqCriterion):
         with torch.no_grad():
             if self.use_centering:
                 # self.update_center(logits_train)
-                # self.iter += 1
                 logits_teacher = (logits_train - self.center)
             else:
                 logits_teacher = logits_train
@@ -506,7 +554,7 @@ class SegCriterionV3(FairseqCriterion):
         self.center_accumulation = self.center_accumulation.type_as(tokens_center) + tokens_center
         self.center_batch_size = self.center_batch_size.type_as(B) + B
 
-        if (self.iter+1) % self.centering_update_freq == 0:
+        if (self.iter+1) % self.criterion_update_freq == 0:
             new_center = self.center_accumulation / self.center_batch_size
 
             self.center = self.center.type_as(self.center_accumulation) * self.center_momentum + new_center * (1 - self.center_momentum)
@@ -523,6 +571,9 @@ class SegCriterionV3(FairseqCriterion):
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
+        
+        # 20221006 수정사항: alpha coefficient 로깅
+        alpha_coefficient = logging_outputs[0].get("alpha_coefficient", 0.0)
         
         area_intersect_sum = sum(log.get("area_intersect", 0) for log in logging_outputs)
         area_pred_label_sum = sum(log.get("area_pred_label", 0) for log in logging_outputs)
@@ -555,6 +606,12 @@ class SegCriterionV3(FairseqCriterion):
         metrics.log_scalar(
             "sample_size", sample_size, 1, round=3
         )
+        
+        # 20221006 수정사항: alpha coefficient 로깅
+        metrics.log_scalar(
+            "alpha_coefficient", alpha_coefficient / sample_size, 1, round=3
+        )
+        
         metrics.log_scalar_sum(
             "_area_intersect", area_intersect_sum, 1
         )
