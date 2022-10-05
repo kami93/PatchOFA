@@ -7,6 +7,7 @@ import math
 from dataclasses import dataclass, field
 from re import S
 from typing import Optional
+import torch.distributed as dist
 
 import torch
 import torch.nn.functional as F
@@ -80,6 +81,12 @@ class SegCriterionV3Config(FairseqDataclass):
     )
     alpha: float = field(
         default=0.5, metadata={"help": "alpha weight"}
+    )
+    use_centering: str = field(
+        default='true', metadata={"help": "whether to apply logit centering"}
+    )
+    centering_update_freq: int = field(
+        default=1, metadata={"help": "update frequency for logit center."}
     )
     
 def resolve_str_true_false(x):
@@ -182,7 +189,9 @@ class SegCriterionV3(FairseqCriterion):
         teacher_temperature=0.1,
         student_temperature=0.1,
         alpha=0.5,
-        unlabeled_threshold=0.0
+        unlabeled_threshold=0.0,
+        use_centering='true',
+        centering_update_freq=1,
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -200,7 +209,9 @@ class SegCriterionV3(FairseqCriterion):
         self.student_temperature = student_temperature
         self.alpha = alpha
         self.unlabeled_threshold = unlabeled_threshold
-            
+        self.centering_update_freq = centering_update_freq
+        
+        self.use_centering = resolve_str_true_false(use_centering)
         self.upscale_lprobs = resolve_str_true_false(upscale_lprobs)
         self.unsupervised_segmentation = resolve_str_true_false(unsupervised_segmentation)
         
@@ -211,6 +222,14 @@ class SegCriterionV3(FairseqCriterion):
             constraint_start, constraint_end = constraint_range.split(',')
             self.constraint_start = int(constraint_start)
             self.constraint_end = int(constraint_end)
+        
+        output_classes = 150
+        if self.use_centering:
+            self.register_buffer("center", torch.zeros(size=(1, output_classes))) # self.center
+            self.register_buffer("center_accumulation", torch.zeros(size=(1, output_classes)), persistent=False) # tmp buffer for accumulated updates. # self.center_accumulation
+            self.center_momentum = 0.9
+            self.register_buffer("center_batch_size", torch.zeros(size=(1, )), persistent=False) # tmp buffer for accumulated updates. # self.center_batch_size
+            self.iter = 0
 
     def forward(self, model, sample, update_num=0, reduce=True):
         """Compute the loss for the given sample.
@@ -322,19 +341,27 @@ class SegCriterionV3(FairseqCriterion):
         return lprobs.view(-1, lprobs.size(-1)), target.view(-1), lprobs_lowres.view(-1, lprobs_lowres.size(-1)), target_lowres.view(-1), constraint_masks
         
     def compute_labeled_loss(self, model, net_output, sample, update_num, reduce=True):
-        lprobs = model.get_normalized_probs(net_output, log_probs=True)
+        # lprobs = model.get_normalized_probs(net_output, log_probs=False)
+        logits = net_output[0].float()
         target = sample.get('text2seg_target')
 
-        lprobs = lprobs.view(-1, lprobs.size(-1))
-        target = target.view(-1)
+        logits = logits[:, :-1]  # remove eos
+        target = target[:, :-1]
         
-        lprobs = lprobs[target != self.padding_idx]
+        logits = logits.reshape(-1, logits.size(-1))
+        target = target.reshape(-1)
+        
+        logits = logits[target != self.padding_idx]
         target = target[target != self.padding_idx]
         
-        # replace 'no <117>' to 0 and 'yes <4420>' to 1
-        target[target==117] = 0
-        target[target==4420] = 1
-        
+        target = target - self.seg_id_offset
+
+        if self.use_centering:
+            self.update_center(logits)
+            self.iter += 1
+
+        lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+
         loss, nll_loss, ntokens = label_smoothed_nll_loss(
             lprobs,
             target,
@@ -367,18 +394,24 @@ class SegCriterionV3(FairseqCriterion):
             target_train = target_lowres
         
         student_logits = logits_train / self.student_temperature
-        
         with torch.no_grad():
-            pred = F.softmax(logits_train, dim=-1)
+            if self.use_centering:
+                # self.update_center(logits_train)
+                # self.iter += 1
+                logits_teacher = (logits_train - self.center)
+            else:
+                logits_teacher = logits_train
+            
+            pred = F.softmax(logits_teacher, dim=-1)
             max_value, max_index = pred.max(1)
             mask = (max_value >= self.unlabeled_threshold)
             if self.teacher_temperature == 0.0:
                 teacher = max_index
                 
             else:
-                teacher_logit = logits_train / self.teacher_temperature
-                teacher = F.softmax(teacher_logit, dim=-1)
-        
+                logits_teacher = logits_teacher / self.teacher_temperature
+                teacher = F.softmax(logits_teacher, dim=-1)
+
         unlabeled_loss = (F.cross_entropy(student_logits, teacher.detach(), label_smoothing=self.eps, reduction='none') * mask).mean()
         
         ntokens = 1
@@ -457,6 +490,29 @@ class SegCriterionV3(FairseqCriterion):
         )
         total = torch.sum(mask)
         return n_correct, total
+
+    @torch.no_grad()
+    def update_center(self, tokens):
+        """
+        Update centers
+        """
+        B = torch.tensor([tokens.size(0)], device=tokens.device, dtype=torch.float)
+
+        tokens_center = torch.sum(tokens.float(), dim=0, keepdim=True)
+        if is_dist_avail_and_initialized() and get_world_size() > 1:
+            dist.all_reduce(tokens_center)
+            dist.all_reduce(B)
+
+        self.center_accumulation = self.center_accumulation.type_as(tokens_center) + tokens_center
+        self.center_batch_size = self.center_batch_size.type_as(B) + B
+
+        if (self.iter+1) % self.centering_update_freq == 0:
+            new_center = self.center_accumulation / self.center_batch_size
+
+            self.center = self.center.type_as(self.center_accumulation) * self.center_momentum + new_center * (1 - self.center_momentum)
+            
+            self.center_accumulation[:] = 0.0
+            self.center_batch_size[:] = 0.0
 
     @classmethod
     def reduce_metrics(cls, logging_outputs) -> None:
@@ -592,3 +648,21 @@ class SegCriterionV3(FairseqCriterion):
         to True will improves distributed training speed.
         """
         return True
+
+def is_dist_avail_and_initialized():
+    if not dist.is_available():
+        return False
+    if not dist.is_initialized():
+        return False
+    return True
+
+def get_world_size():
+    if not is_dist_avail_and_initialized():
+        return 1
+    return dist.get_world_size()
+
+
+def get_rank():
+    if not is_dist_avail_and_initialized():
+        return 0
+    return dist.get_rank()

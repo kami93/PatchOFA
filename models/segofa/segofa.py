@@ -133,7 +133,10 @@ class SegOFAModel(TransformerModel):
         if aux_input is not None:
             aux_encoder_out = self.encoder(
                 aux_input.get("src_tokens"),
-                src_lengths=aux_input.get("src_lengths")
+                src_lengths=aux_input.get("src_lengths"),
+                patch_images=aux_input.get("patch_images"),
+                patch_masks=aux_input.get("patch_masks"),
+                text2seg_decoding=True
             )
 
             aux_output = self.decoder(

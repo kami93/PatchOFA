@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
-CLASSES = [
+CLASSES = np.array([
     'wall', 'building', 'sky', 'floor', 'tree', 'ceiling', 'road', 'bed ',
     'windowpane', 'grass', 'cabinet', 'sidewalk', 'person', 'earth',
     'door', 'table', 'mountain', 'plant', 'curtain', 'chair', 'car',
@@ -59,7 +59,7 @@ CLASSES = [
     'dishwasher', 'screen', 'blanket', 'sculpture', 'hood', 'sconce',
     'vase', 'traffic light', 'tray', 'ashcan', 'fan', 'pier', 'crt screen',
     'plate', 'monitor', 'bulletin board', 'shower', 'radiator', 'glass',
-    'clock', 'flag']
+    'clock', 'flag'])
 
 def collate(samples, pad_idx, eos_idx):
     if len(samples) == 0:
@@ -107,6 +107,12 @@ def collate(samples, pad_idx, eos_idx):
         if samples[0].get("text2seg_prev_output_tokens", None) is not None:
             text2seg_prev_output_tokens = merge("text2seg_prev_output_tokens")
 
+    text2seg_patch_images = None
+    text2seg_patch_masks = None
+    if samples[0].get("text2seg_patch_image", None) is not None:
+        text2seg_patch_images = merge("text2seg_patch_image")
+        text2seg_patch_masks = torch.cat([sample['text2seg_patch_mask'] for sample in samples])
+        
     batch = {
         "id": id,
         "nsentences": len(samples),
@@ -121,6 +127,8 @@ def collate(samples, pad_idx, eos_idx):
         "aux_input": {
             "src_tokens": text2seg_src_tokens,
             "src_lengths": text2seg_src_lengths,
+            "patch_images": text2seg_patch_images,
+            "patch_masks": text2seg_patch_masks,
             "prev_output_tokens": text2seg_prev_output_tokens,
         },
         "target": target,
@@ -183,11 +191,15 @@ class SegmentationDataset(OFADataset):
             
         self.prompt = ' what is the segmentation of the image?'
         
-        self.id2seg = [f'<seg_{idx}>' for idx in range(151)]
+        self.id2seg = np.array([f'<seg_{idx}>' for idx in range(151)])
         self.seg2code = self.encode_text(" ".join(self.id2seg), use_bpe=False)
 
         self.pos_tgt_item = self.encode_text(" yes")
         self.neg_tgt_item = self.encode_text(" no")
+        
+        self.id2text = [self.encode_text(f" {x}") for x in CLASSES]
+        self.text_length = [len(x) for x in self.id2text]
+        
 
     def encode_text(self, text, length=None, append_bos=False, append_eos=False, use_bpe=True):
         line = [self.bpe.encode(' {}'.format(word.strip())) if not word.startswith('<seg_') else word for word in text.strip().split()]
@@ -298,39 +310,87 @@ class SegmentationDataset(OFADataset):
             "prev_output_tokens": prev_output_item
         }
 
-        rand0, rand1 = np.random.choice(150, size=2, replace=False)
-        prob = random.random()
-        if prob >= 0.5:
-            # Make Positive Pair
-            text = CLASSES[rand0]
-            seg = self.id2seg[rand0]
-            pos_pair = [text, seg]
-            pos_src_item = torch.cat([self.bos_item, self.get_src_item_given_pair(pos_pair), self.eos_item])
+        rand = np.random.choice(150, size=1024, replace=True)
+        
+
+        code = self.seg2code[rand]
+
+        text_list = torch.cat([self.id2text[idx] for idx in rand])
+        text_length = torch.tensor([self.text_length[idx] for idx in rand], dtype=torch.long)
+
+        example["text2seg_patch_image"] = text_list
+        example["text2seg_patch_mask"] = text_length.cumsum(dim=0)
+        example["text2seg_source"] = src_item
+        example["text2seg_target"] = torch.cat([code, self.eos_item])
+        example["text2seg_prev_output_tokens"] = torch.cat([self.bos_item, code])
+
+        # rand = random.randint(0, 149)
+        # text = CLASSES[rand]
+        # seg = self.id2seg[rand]
+        # segcode = self.seg2code[rand]
+        
+        # prob = random.random()
+
+        # if prob >= 0.5:
+        #     text2seg_prompt = f' " {text} "' + self.prompt
+        #     text2seg_source = self.encode_text(text2seg_prompt)
+        #     text2seg_src_item = torch.cat([self.bos_item, text2seg_source, self.eos_item])
+        #     example["text2seg_source"] = text2seg_src_item
+
+        #     text2seg_prev_output_item = torch.cat([self.bos_item, text2seg_source])
+        #     example["text2seg_prev_output_tokens"] = text2seg_prev_output_item
+
+        #     text2seg_target = torch.cat([text2seg_source, segcode.unsqueeze(0)])
+        #     text2seg_target[:-1] = self.tgt_dict.pad()
+        #     example["text2seg_target"] = text2seg_target
+        # else:
+        #     text2seg_prompt = f' " {seg} "' + self.prompt
+        #     text2seg_source = self.encode_text(text2seg_prompt)
+        #     text2seg_src_item = torch.cat([self.bos_item, text2seg_source, self.eos_item])
+        #     example["text2seg_source"] = text2seg_src_item
             
-            example["text2seg_source"] = pos_src_item
+        #     target_text = self.encode_text(f" {text}")
+        #     text2seg_target = torch.cat([text2seg_source, target_text])
+        #     text2seg_target[:-len(target_text)] = self.tgt_dict.pad()
+        #     example["text2seg_target"] = text2seg_target
+
+        #     text2seg_prev_output_item = torch.cat([self.bos_item, text2seg_source, target_text])
+        #     example["text2seg_prev_output_tokens"] = text2seg_prev_output_item[:-1]
+
+
+        # rand0, rand1 = np.random.choice(150, size=2, replace=False)
+        # prob = random.random()
+        # if prob >= 0.5:
+        #     # Make Positive Pair
+        #     text = CLASSES[rand0]
+        #     seg = self.id2seg[rand0]
+        #     pos_pair = [text, seg]
+        #     pos_src_item = torch.cat([self.bos_item, self.get_src_item_given_pair(pos_pair), self.eos_item])
             
-            pos_prev_output_item = pos_src_item[:-1].clone()
-            pos_target_item = torch.cat([pos_prev_output_item[1:], self.pos_tgt_item])
-            pos_target_item[:-1] = self.tgt_dict.pad()
+        #     example["text2seg_source"] = pos_src_item
             
-            example["text2seg_target"] = pos_target_item
-            example["text2seg_prev_output_tokens"] = pos_prev_output_item
+        #     pos_prev_output_item = pos_src_item[:-1].clone()
+        #     pos_target_item = torch.cat([pos_prev_output_item[1:], self.pos_tgt_item])
+        #     pos_target_item[:-1] = self.tgt_dict.pad()
             
-        else:
-            # Make Negative Pair
-            text = CLASSES[rand0]
-            seg = self.id2seg[rand1]
-            neg_pair = [text, seg]
-            neg_src_item = torch.cat([self.bos_item, self.get_src_item_given_pair(neg_pair), self.eos_item])
+        #     example["text2seg_target"] = pos_target_item
+        #     example["text2seg_prev_output_tokens"] = pos_prev_output_item
             
-            example["text2seg_source"] = neg_src_item
+        # else:
+        #     # Make Negative Pair
+        #     text = CLASSES[rand0]
+        #     seg = self.id2seg[rand1]
+        #     neg_pair = [text, seg]
+        #     neg_src_item = torch.cat([self.bos_item, self.get_src_item_given_pair(neg_pair), self.eos_item])
             
-            neg_prev_output_item = neg_src_item[:-1].clone()
-            neg_target_item = torch.cat([neg_prev_output_item[1:], self.neg_tgt_item])
-            neg_target_item[:-1] = self.tgt_dict.pad()
+        #     example["text2seg_source"] = neg_src_item
             
-            example["text2seg_target"] = neg_target_item
-            example["text2seg_prev_output_tokens"] = neg_prev_output_item
+        #     neg_prev_output_item = neg_src_item[:-1].clone()
+        #     neg_target_item = torch.cat([neg_prev_output_item[1:], self.neg_tgt_item])
+        #     neg_target_item[:-1] = self.tgt_dict.pad()
+            
+        #     example["text2seg_target"] = neg_target_item
+        #     example["text2seg_prev_output_tokens"] = neg_prev_output_item
         
         return example
 
