@@ -360,7 +360,9 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='scale resids')
         parser.add_argument('--one-step-decoder-type', type=str,
                             help='mask | region | old | image | image_onestep')
-        parser.add_argument('--no-grad-image', type=str,
+        parser.add_argument('--no-grad-image', type=str, default='false',
+                            help='true | false')
+        parser.add_argument('--l2-normalized-seg', type=str, default='false',
                             help='true | false')
         
         # fmt: on
@@ -1499,6 +1501,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.one_step_decoder_type = args.one_step_decoder_type
         
         self.no_grad_image = resolve_str_true_false(args.no_grad_image)
+        self.l2_normalized_seg = resolve_str_true_false(args.l2_normalized_seg)
 
     def get_decoder_prompt(self, prompt_tokens):
         past_key_values = self.decoder_prompt_encoder(prompt_tokens)
@@ -1673,6 +1676,13 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             alignment_heads=alignment_heads,
             text2seg_decoding=text2seg_decoding,
         )
+
+        #######
+        # Apply L2 Norm
+        if self.l2_normalized_seg:
+            x = nn.functional.normalize(x, dim=-1, p=2)
+        
+        ######
 
         if not features_only:
             x = self.output_layer(x)
