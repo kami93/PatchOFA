@@ -326,10 +326,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='freeze resnet (bn only)')
         parser.add_argument('--freeze-entire-resnet', action='store_true',
                             help='freeze resnet (all params)')
-        parser.add_argument('--freeze-encoder-embedding', action='store_true',
-                            help='freeze encoder token embedding')
-        parser.add_argument('--freeze-decoder-embedding', action='store_true',
-                            help='freeze decoder token embedding')
+        parser.add_argument('--freeze-encoder-embedding', type=str, default='false', help='freeze encoder token embedding')
+        parser.add_argument('--freeze-decoder-embedding', type=str, default='false',  help='freeze decoder token embedding')
         parser.add_argument('--add-type-embedding', action='store_true',
                             help='add source/region/patch type embedding')
         parser.add_argument('--interpolate-position', action='store_true',
@@ -417,10 +415,14 @@ class TransformerModel(FairseqEncoderDecoderModel):
             decoder_embed_tokens = cls.build_embedding(
                 args, tgt_dict, args.decoder_embed_dim, args.decoder_embed_path
             )
-        if getattr(args, "freeze_encoder_embedding", False) or getattr(
+        
+        freeze_encoder_embedding = resolve_str_true_false(args.freeze_encoder_embedding)
+        freeze_decoder_embedding = resolve_str_true_false(args.freeze_decoder_embedding)
+        
+        if freeze_encoder_embedding or getattr(
                 args, "encoder_prompt", False) or getattr(args, "decoder_prompt", False) or getattr(args, "adapter", False):    
             encoder_embed_tokens.weight.requires_grad = False
-        if getattr(args, "freeze_decoder_embedding", False) or getattr(
+        if freeze_decoder_embedding or getattr(
                 args, "encoder_prompt", False) or getattr(args, "decoder_prompt", False) or getattr(args, "adapter", False):    
             decoder_embed_tokens.weight.requires_grad = False
         if getattr(args, "offload_activations", False):
