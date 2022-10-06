@@ -6,6 +6,7 @@
 import math
 import random
 from typing import Any, Dict, List, Optional, Tuple
+import contextlib
 
 import torch
 import torch.nn as nn
@@ -46,12 +47,26 @@ DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 DEFAULT_MIN_PARAMS_TO_WRAP = int(1e8)
 
+def resolve_str_true_false(x):
+    x = x.lower()
+    if x == 'true':
+        return True
+    elif x == 'false':
+        return False
+    else:
+        raise ValueError(f"Unable to recognize string bool input: {x}")
 
 def BatchNorm2d(out_chan, momentum=0.1, eps=1e-3):
     return nn.SyncBatchNorm.convert_sync_batchnorm(
         nn.BatchNorm2d(out_chan, momentum=momentum, eps=eps)
     )
 
+def maybe_no_grad(no_grad=True):
+
+    if no_grad:
+        return torch.no_grad()
+    else:
+        return contextlib.ExitStack()  # dummy contextmanager
 
 def make_token_bucket_position(bucket_size, max_position=DEFAULT_MAX_SOURCE_POSITIONS):
     context_pos = torch.arange(max_position, dtype=torch.long)[:, None]
@@ -347,6 +362,9 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='scale resids')
         parser.add_argument('--one-step-decoder-type', type=str,
                             help='mask | region | old | image | image_onestep')
+        parser.add_argument('--no-grad-image', type=str,
+                            help='true | false')
+        
         # fmt: on
 
     @classmethod
@@ -648,6 +666,8 @@ class TransformerEncoder(FairseqEncoder):
         self.register_buffer("image_rp_bucket", image_rp_bucket)
 
         self.entangle_position_embedding = args.entangle_position_embedding
+        
+        self.no_grad_image = resolve_str_true_false(args.no_grad_image)
 
     def build_encoder_layer(self, args, drop_path_rate=0.0):
         layer = TransformerEncoderLayer(args, drop_path_rate=drop_path_rate, \
@@ -859,8 +879,6 @@ class TransformerEncoder(FairseqEncoder):
         token_embeddings: Optional[torch.Tensor] = None,
         sample_patch_num: Optional[int] = None
     ):
-        
-        
         prompt_tokens = None
         prompt_padding_mask = None
         prompt_kv_list = None
@@ -891,11 +909,8 @@ class TransformerEncoder(FairseqEncoder):
             patch_masks = patch_masks + offset.unsqueeze(1)
             patch_masks = patch_masks[:, :-1].flatten()
 
-            # 20221006 수정사항
-            # text 임베딩에 gradient 통과시키지 않음
-            with torch.no_grad():
-                image_embed = self.embed_tokens_bag(patch_images, offsets=patch_masks)
-                image_embed = rearrange(image_embed, '(b h w) d -> b d h w', b=bsz, h=32, w=32)
+            image_embed = self.embed_tokens_bag(patch_images, offsets=patch_masks)
+            image_embed = rearrange(image_embed, '(b h w) d -> b d h w', b=bsz, h=32, w=32)
             
             h, w = image_embed.shape[-2:]
             image_num_patches = h * w
@@ -929,10 +944,7 @@ class TransformerEncoder(FairseqEncoder):
 
         # embed tokens and positions
         if token_embeddings is None:
-            # 20221006 수정사항
-            # text 임베딩에 gradient 통과시키지 않음
-            with torch.no_grad():
-                token_embeddings = self.embed_tokens(src_tokens)
+            token_embeddings = self.embed_tokens(src_tokens)
                 
         x = embed = self.embed_scale * token_embeddings
         if self.entangle_position_embedding and pos_embed is not None:
@@ -1470,6 +1482,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         seg_embed_idx = torch.tensor(seg_embed_idx, dtype=torch.long)
         self.register_buffer("seg_embed_idx", seg_embed_idx) # self.seg_embed_idx
 
+        self.seg_projection = Linear(embed_dim, num_seg)
+
         self.register_buffer("seg_rp_bucket", seg_rp_bucket)
         self.register_buffer("token_rp_bucket", token_rp_bucket)
         self.register_buffer("image_rp_bucket", image_rp_bucket)
@@ -1481,6 +1495,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.register_buffer("region_prefix", torch.tensor([976,  35])) # "region: "
         
         self.one_step_decoder_type = args.one_step_decoder_type
+        
+        self.no_grad_image = resolve_str_true_false(args.no_grad_image)
 
     def get_decoder_prompt(self, prompt_tokens):
         past_key_values = self.decoder_prompt_encoder(prompt_tokens)
@@ -1498,8 +1514,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
     def output_projection(self, features):
         # Special output projection for supervised segmentation task
-        seg_embeds = self.embed_tokens(self.seg_embed_idx)
-        proj = F.linear(features, seg_embeds)
+        proj = self.seg_projection(features)
         
         return proj
 
@@ -2452,9 +2467,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             bos = prev_output_tokens[:, :1]
             
             image_embed_before_scale = encoder_out["image_embed_before_scale"][0]
-            # 20221006 수정사항
-            # "입력단" 쪽으로 흐르는 그래디언트는 막아줘서 ResNet 의 Collapse 방지
-            image_embed_before_scale = image_embed_before_scale.detach() # STOP_GRAD
+
+            if self.no_grad_image:
+                image_embed_before_scale = image_embed_before_scale.detach() # STOP_GRAD
             
             # 여기서는 self.embed_tokens(bos) 을 그냥 놔뒀는데,
             # 어차피 unlabeled loss 의 학습이 시작될 때 embedding 전체를 프리즈시키기 때문에 bos 관련해서는 아무것도 안해줘도 됨.
@@ -2658,11 +2673,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
             # embed tokens and positions
             bos = prev_output_tokens[:, :1]
-            
-            # 20221006 수정사항
-            # labeled loss 계산할 때, text 임베딩에 gradient 통과시키지 않음
-            with torch.no_grad():
-                embeded_bos = self.embed_tokens(bos)
+            embeded_bos = self.embed_tokens(bos)
             
             x = torch.cat([embeded_bos, encoder_out["image_embed_before_scale"][0]], dim=1)
             x = x * self.embed_scale

@@ -281,6 +281,7 @@ class SegCriterionV3(FairseqCriterion):
                 logger.info(f"Freezing embeddings as effective_iter reached {self.freeze_embedding_iter} (raw iter == {self.iter})")
             model.encoder.embed_tokens.weight.requires_grad_(False)
             model.decoder.embed_tokens.weight.requires_grad_(False)
+            model.decoder.seg_projection.weight.requires_grad_(False)
         
         if self.use_centering:
             # send centering buffers to a gpu device, if applicable
