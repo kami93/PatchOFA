@@ -258,8 +258,9 @@ class SegCriterionV3(FairseqCriterion):
         """
         # 20221006 수정사항
         # count effective iterations given iter and criterion_update_freq
-        self.iter += 1
-        self.effective_iter = self.iter // self.criterion_update_freq
+        if model.training:
+            self.iter += 1
+            self.effective_iter = self.iter // self.criterion_update_freq
         
         # 20221006 수정사항
         # hard ramp-up 적용
@@ -306,17 +307,22 @@ class SegCriterionV3(FairseqCriterion):
         else:
             compute_seg_loss = self.compute_loss
                 
-        seg_loss, nll_loss, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce)
+        seg_loss, nll_loss, threshold_mask, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce)
         
         loss = (1.0 - alpha_coefficient) * labeled_loss + alpha_coefficient * seg_loss
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
+        
+        abs_center = self.center.abs()
         logging_output = {
             "loss": loss.data,
             "labeled_loss": labeled_loss.data,
             "nll_loss": nll_loss.data,
             "alpha_coefficient": alpha_coefficient, # 20221006 수정사항: alpha coefficient 로깅
+            "threshold_mask_ratio": threshold_mask.sum() / threshold_mask.numel(),
+            "abs_center_max": abs_center.max(),
+            "abs_center_mean": abs_center.mean(),
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
@@ -407,8 +413,8 @@ class SegCriterionV3(FairseqCriterion):
         
         target = target - self.seg_id_offset
 
-        if self.use_centering:
-            self.update_center(logits)
+        # if self.use_centering:
+        #     self.update_center(logits)
 
         lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
 
@@ -446,14 +452,15 @@ class SegCriterionV3(FairseqCriterion):
         student_logits = logits_train / self.student_temperature
         with torch.no_grad():
             if self.use_centering:
-                # self.update_center(logits_train)
+                if model.training:
+                    self.update_center(logits_train)
                 logits_teacher = (logits_train - self.center)
             else:
                 logits_teacher = logits_train
             
             pred = F.softmax(logits_teacher, dim=-1)
             max_value, max_index = pred.max(1)
-            mask = (max_value >= self.unlabeled_threshold)
+            threshold_mask = (max_value >= self.unlabeled_threshold)
             if self.teacher_temperature == 0.0:
                 teacher = max_index
                 
@@ -461,7 +468,7 @@ class SegCriterionV3(FairseqCriterion):
                 logits_teacher = logits_teacher / self.teacher_temperature
                 teacher = F.softmax(logits_teacher, dim=-1)
 
-        unlabeled_loss = (F.cross_entropy(student_logits, teacher.detach(), label_smoothing=self.eps, reduction='none') * mask).mean()
+        unlabeled_loss = (F.cross_entropy(student_logits, teacher.detach(), label_smoothing=self.eps, reduction='none') * threshold_mask).mean()
         
         ntokens = 1
         unlabeled_loss = unlabeled_loss.mean()
@@ -469,7 +476,7 @@ class SegCriterionV3(FairseqCriterion):
         area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(logits_lowres, target_lowres)
         area_intersect, area_pred_label, area_label, area_union = self.compute_metric(logits, target)
         
-        return unlabeled_loss, unlabeled_loss, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
+        return unlabeled_loss, unlabeled_loss, threshold_mask, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
 
     def compute_loss(self, model, net_output, sample, update_num, reduce=True):
         lprobs, target, lprobs_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample)
@@ -576,6 +583,10 @@ class SegCriterionV3(FairseqCriterion):
         # 20221006 수정사항: alpha coefficient 로깅
         alpha_coefficient = logging_outputs[0].get("alpha_coefficient", 0.0)
         
+        threshold_mask_ratio_sum = sum(log.get("threshold_mask_ratio", 0.0) for log in logging_outputs)
+        abs_center_max = logging_outputs[0].get("abs_center_max", 0.0)
+        abs_center_mean = logging_outputs[0].get("abs_center_mean", 0.0)
+        
         area_intersect_sum = sum(log.get("area_intersect", 0) for log in logging_outputs)
         area_pred_label_sum = sum(log.get("area_pred_label", 0) for log in logging_outputs)
         area_label_sum = sum(log.get("area_label", 0) for log in logging_outputs)
@@ -612,7 +623,15 @@ class SegCriterionV3(FairseqCriterion):
         metrics.log_scalar(
             "alpha_coefficient", alpha_coefficient / sample_size, 1, round=3
         )
-        
+        metrics.log_scalar(
+            "threshold_mask_ratio", threshold_mask_ratio_sum / sample_size, 1, round=3
+        )
+        metrics.log_scalar(
+            "abs_center_max", abs_center_max / sample_size, 1, round=3
+        )
+        metrics.log_scalar(
+            "abs_center_mean", abs_center_mean / sample_size, 1, round=3
+        )
         metrics.log_scalar_sum(
             "_area_intersect", area_intersect_sum, 1
         )
