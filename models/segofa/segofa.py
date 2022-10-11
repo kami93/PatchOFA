@@ -111,8 +111,9 @@ class SegOFAModel(TransformerModel):
             alignment_heads=alignment_heads,
             src_lengths=src_lengths,
             return_all_hiddens=return_all_hiddens,
-            text2seg_decoding=False,
+            decoder_type='mlp',
         )
+        extra['encoder_returns'] = encoder_out
 
         pad = self.encoder.padding_idx
         if classification_head_name is not None:
@@ -128,22 +129,20 @@ class SegOFAModel(TransformerModel):
                     x = head(sentence_representation)
                     break
     
-        extra['encoder_returns'] = encoder_out
-
         if aux_input is not None:
             aux_encoder_out = self.encoder(
                 aux_input.get("src_tokens"),
                 src_lengths=aux_input.get("src_lengths"),
                 patch_images=aux_input.get("patch_images"),
                 patch_masks=aux_input.get("patch_masks"),
-                text2seg_decoding=True
+                use_fake_image=True
             )
 
             aux_output = self.decoder(
                 aux_input.get("prev_output_tokens"),
                 encoder_out=aux_encoder_out,
                 src_lengths=aux_input.get("src_lengths"),
-                text2seg_decoding=True,
+                decoder_type='surrogate',
             )
             
             extra['aux_output'] = aux_output
@@ -249,8 +248,10 @@ class SegOFAModel(TransformerModel):
         # When finetuning on translation task, remove last row of
         # embedding matrix that corresponds to mask_idx token.
         loaded_dict_size = state_dict["encoder.embed_tokens.weight"].size(0)
+        
+        encoder_dict_length = len(self.encoder.dictionary) - self.args.num_seg_tokens
         if (
-            loaded_dict_size == len(self.encoder.dictionary) + 1
+            loaded_dict_size == encoder_dict_length + 1
             and "<mask>" not in self.encoder.dictionary
         ):
             truncate_emb("encoder.embed_tokens.weight")
@@ -258,8 +259,8 @@ class SegOFAModel(TransformerModel):
             truncate_emb("encoder.output_projection.weight")
             truncate_emb("decoder.output_projection.weight")
 
-        if loaded_dict_size < len(self.encoder.dictionary):
-            num_langids_to_add = len(self.encoder.dictionary) - loaded_dict_size
+        if loaded_dict_size < encoder_dict_length:
+            num_langids_to_add = encoder_dict_length - loaded_dict_size
             embed_dim = state_dict["encoder.embed_tokens.weight"].size(1)
 
             new_lang_embed_to_add = torch.zeros(num_langids_to_add, embed_dim)

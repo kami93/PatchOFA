@@ -95,23 +95,35 @@ def collate(samples, pad_idx, eos_idx):
     else:
         ntokens = src_lengths.sum().item()
 
+    text_target = None
+    if samples[0].get("text_target", None) is not None:
+        text_target = merge("text_target")
 
-    text2seg_src_tokens = merge("text2seg_source")
-    text2seg_src_lengths = torch.LongTensor([s["text2seg_source"].ne(pad_idx).long().sum() for s in samples])
-
-    text2seg_prev_output_tokens = None
+    aux_input = None
     text2seg_target = None
-    if samples[0].get("text2seg_target", None) is not None:
-        text2seg_target = merge("text2seg_target")
+    if samples[0].get("text2seg_source", None) is not None:
+        text2seg_src_tokens = merge("text2seg_source")
+        text2seg_src_lengths = torch.LongTensor([s["text2seg_source"].ne(pad_idx).long().sum() for s in samples])
+
+        if samples[0].get("text2seg_target", None) is not None:
+            text2seg_target = merge("text2seg_target")
 
         if samples[0].get("text2seg_prev_output_tokens", None) is not None:
             text2seg_prev_output_tokens = merge("text2seg_prev_output_tokens")
 
-    text2seg_patch_images = None
-    text2seg_patch_masks = None
-    if samples[0].get("text2seg_patch_image", None) is not None:
-        text2seg_patch_images = merge("text2seg_patch_image")
-        text2seg_patch_masks = torch.cat([sample['text2seg_patch_mask'] for sample in samples])
+        text2seg_patch_images = None
+        text2seg_patch_masks = None
+        if samples[0].get("text2seg_patch_image", None) is not None:
+            text2seg_patch_images = merge("text2seg_patch_image")
+            text2seg_patch_masks = torch.cat([sample['text2seg_patch_mask'] for sample in samples])
+        
+        aux_input = {
+            "src_tokens": text2seg_src_tokens,
+            "src_lengths": text2seg_src_lengths,
+            "patch_images": text2seg_patch_images,
+            "patch_masks": text2seg_patch_masks,
+            "prev_output_tokens": text2seg_prev_output_tokens,
+        }
         
     batch = {
         "id": id,
@@ -124,14 +136,9 @@ def collate(samples, pad_idx, eos_idx):
             "patch_masks": patch_masks,
             "prev_output_tokens": prev_output_tokens
         },
-        "aux_input": {
-            "src_tokens": text2seg_src_tokens,
-            "src_lengths": text2seg_src_lengths,
-            "patch_images": text2seg_patch_images,
-            "patch_masks": text2seg_patch_masks,
-            "prev_output_tokens": text2seg_prev_output_tokens,
-        },
+        "aux_input": aux_input,
         "target": target,
+        "text_target": text_target,
         "downsampled_target": downsampled_target,
         "text2seg_target": text2seg_target
     }
@@ -189,7 +196,7 @@ class SegmentationDataset(OFADataset):
             self.image_transform = Resize(img_scale=(512, 512), keep_ratio=False)
             self.downsample_gt_seg = transforms.Resize(32, transforms.InterpolationMode.NEAREST)
             
-        self.prompt = ' what is the segmentation of the image?'
+        # self.prompt = self.encode_text(' what is the segmentation of the image?')
         
         self.id2seg = np.array([f'<seg_{idx}>' for idx in range(151)])
         self.seg2code = self.encode_text(" ".join(self.id2seg), use_bpe=False)
@@ -229,7 +236,7 @@ class SegmentationDataset(OFADataset):
         image_arr = image_arr[:, :, ::-1].copy() # to BGR
         
         segmentation = Image.open(BytesIO(base64.urlsafe_b64decode(segmentation)))
-        segmentation_arr = np.asarray(segmentation)
+        segmentation_arr = np.asarray(segmentation).copy()
         
         patch_mask = torch.tensor([True])
 
@@ -288,11 +295,12 @@ class SegmentationDataset(OFADataset):
             import pdb; pdb.set_trace()
             abc = 1
 
-        src_item = self.encode_text(self.prompt)
+        src_item = torch.cat(self.id2text)
         src_item = torch.cat([self.bos_item, src_item, self.eos_item])
-
-        gt_semantic_seg_downsampled = self.downsample_gt_seg(gt_semantic_seg.unsqueeze(0))
         
+        text_target = torch.stack([self.seg2code[i] for i in range(150) for _ in range(self.text_length[i])])
+        
+        gt_semantic_seg_downsampled = self.downsample_gt_seg(gt_semantic_seg.unsqueeze(0))
         seg_ids = self.seg2code[gt_semantic_seg.flatten()]
         seg_ids_downsampled = self.seg2code[gt_semantic_seg_downsampled.flatten()]
         
@@ -306,23 +314,23 @@ class SegmentationDataset(OFADataset):
             "patch_image": img,
             "patch_mask": patch_mask,
             "target": target,
+            "text_target": text_target,
             "downsampled_target": downsampled_target,
             "prev_output_tokens": prev_output_item
         }
 
-        rand = np.random.choice(150, size=1024, replace=True)
-        
+        if False:
+            rand = np.random.choice(150, size=1024, replace=True)
+            code = self.seg2code[rand]
 
-        code = self.seg2code[rand]
+            text_list = torch.cat([self.id2text[idx] for idx in rand])
+            text_length = torch.tensor([self.text_length[idx] for idx in rand], dtype=torch.long)
 
-        text_list = torch.cat([self.id2text[idx] for idx in rand])
-        text_length = torch.tensor([self.text_length[idx] for idx in rand], dtype=torch.long)
-
-        example["text2seg_patch_image"] = text_list
-        example["text2seg_patch_mask"] = text_length.cumsum(dim=0)
-        example["text2seg_source"] = src_item
-        example["text2seg_target"] = torch.cat([code, self.eos_item])
-        example["text2seg_prev_output_tokens"] = torch.cat([self.bos_item, code])
+            example["text2seg_patch_image"] = text_list
+            example["text2seg_patch_mask"] = text_length.cumsum(dim=0)
+            example["text2seg_source"] = src_item
+            example["text2seg_target"] = torch.cat([code, self.eos_item])
+            example["text2seg_prev_output_tokens"] = torch.cat([self.bos_item, code])
 
         # rand = random.randint(0, 149)
         # text = CLASSES[rand]
