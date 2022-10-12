@@ -155,10 +155,13 @@ class TransformerEncoder(FairseqEncoder):
         else:
             self.type_embedding = None
 
+        freeze_entire_resnet = resolve_str_true_false(args.freeze_entire_resnet)
+        freeze_resnet = resolve_str_true_false(args.freeze_resnet)
+
         if getattr(args, "sync_bn", False):
             norm_layer = BatchNorm2d
         else:
-            if getattr(args, "freeze_resnet", False) or getattr(args, "freeze_entire_resnet", False):
+            if freeze_resnet or freeze_entire_resnet:
                 logger.info("Freezing ResNet BN layers...")
                 norm_layer = FrozenBatchNorm2d
             else:
@@ -179,7 +182,7 @@ class TransformerEncoder(FairseqEncoder):
             resnet_state_dict = torch.load(self.args.resnet_model_path)
             self.embed_images.load_state_dict(resnet_state_dict)
 
-        if getattr(args, "freeze_entire_resnet", False):
+        if freeze_entire_resnet:
             logger.info("Freezing all ResNet parameters...")
             for param in self.embed_images.parameters():
                 param.requires_grad_(False)

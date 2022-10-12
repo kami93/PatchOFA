@@ -264,10 +264,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
 
         parser.add_argument('--attn-scale-factor', type=float,
                             help='attention scale factor')
-        parser.add_argument('--freeze-resnet', action='store_true',
-                            help='freeze resnet (bn only)')
-        parser.add_argument('--freeze-entire-resnet', action='store_true',
-                            help='freeze resnet (all params)')
+        parser.add_argument('--freeze-resnet', type=str, default='false', help='freeze resnet (bn only)')
+        parser.add_argument('--freeze-entire-resnet', type=str, default='false', help='freeze resnet (all params)')
         parser.add_argument('--freeze-encoder-embedding', type=str, default='false', help='freeze encoder token embedding')
         parser.add_argument('--freeze-decoder-embedding', type=str, default='false',  help='freeze decoder token embedding')
         parser.add_argument('--add-type-embedding', action='store_true',
