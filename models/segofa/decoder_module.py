@@ -129,7 +129,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.seg_embed_tokens = seg_embed_tokens
         
         num_seg_tokens = 150
-        self.seg_projection = Linear(embed_dim, num_seg_tokens)
+        self.seg_projection = Linear(embed_dim, num_seg_tokens, bias=False)
         self.seg_projection.weight = self.seg_embed_tokens.weight
         
         if self.use_mlp_decoder:
