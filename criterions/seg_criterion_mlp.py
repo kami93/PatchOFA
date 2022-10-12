@@ -24,6 +24,32 @@ from omegaconf import II
 import logging
 logger = logging.getLogger(__name__)
 
+CLASSES = np.array([
+    'wall', 'building', 'sky', 'floor', 'tree', 'ceiling', 'road', 'bed ',
+    'windowpane', 'grass', 'cabinet', 'sidewalk', 'person', 'earth',
+    'door', 'table', 'mountain', 'plant', 'curtain', 'chair', 'car',
+    'water', 'painting', 'sofa', 'shelf', 'house', 'sea', 'mirror', 'rug',
+    'field', 'armchair', 'seat', 'fence', 'desk', 'rock', 'wardrobe',
+    'lamp', 'bathtub', 'railing', 'cushion', 'base', 'box', 'column',
+    'signboard', 'chest of drawers', 'counter', 'sand', 'sink',
+    'skyscraper', 'fireplace', 'refrigerator', 'grandstand', 'path',
+    'stairs', 'runway', 'case', 'pool table', 'pillow', 'screen door',
+    'stairway', 'river', 'bridge', 'bookcase', 'blind', 'coffee table',
+    'toilet', 'flower', 'book', 'hill', 'bench', 'countertop', 'stove',
+    'palm', 'kitchen island', 'computer', 'swivel chair', 'boat', 'bar',
+    'arcade machine', 'hovel', 'bus', 'towel', 'light', 'truck', 'tower',
+    'chandelier', 'awning', 'streetlight', 'booth', 'television receiver',
+    'airplane', 'dirt track', 'apparel', 'pole', 'land', 'bannister',
+    'escalator', 'ottoman', 'bottle', 'buffet', 'poster', 'stage', 'van',
+    'ship', 'fountain', 'conveyer belt', 'canopy', 'washer', 'plaything',
+    'swimming pool', 'stool', 'barrel', 'basket', 'waterfall', 'tent',
+    'bag', 'minibike', 'cradle', 'oven', 'ball', 'food', 'step', 'tank',
+    'trade name', 'microwave', 'pot', 'animal', 'bicycle', 'lake',
+    'dishwasher', 'screen', 'blanket', 'sculpture', 'hood', 'sconce',
+    'vase', 'traffic light', 'tray', 'ashcan', 'fan', 'pier', 'crt screen',
+    'plate', 'monitor', 'bulletin board', 'shower', 'radiator', 'glass',
+    'clock', 'flag'])
+
 @dataclass
 class SegCriterionMLPConfig(FairseqDataclass):
     label_smoothing: float = field(
@@ -97,6 +123,9 @@ class SegCriterionMLPConfig(FairseqDataclass):
     freeze_embedding_iter: int = field(
         default=-1, metadata={
             "help": "Freeze the token embedding after this iteration (ignored if -1). ``effective iteration'' (1 iter per N update-freq) is used."}
+    )
+    init_seg_with_text: str = field(
+        default='true', metadata={"help": "whether to lazy initialize the seg token with text embedding bags."}
     )
     
 def resolve_str_true_false(x):
@@ -204,6 +233,7 @@ class SegCriterionMLP(FairseqCriterion):
         criterion_update_freq=1,
         hard_rampup_iter=0,
         freeze_embedding_iter=-1,
+        init_seg_with_text='true',
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -232,6 +262,7 @@ class SegCriterionMLP(FairseqCriterion):
         self.use_centering = resolve_str_true_false(use_centering)
         self.upscale_lprobs = resolve_str_true_false(upscale_lprobs)
         self.unsupervised_segmentation = resolve_str_true_false(unsupervised_segmentation)
+        self.init_seg_with_text = resolve_str_true_false(init_seg_with_text)
         
         self.seg_id_offset = task.target_dictionary.index("<seg_0>")
         self.constraint_start = None
@@ -256,6 +287,30 @@ class SegCriterionMLP(FairseqCriterion):
         2) the sample size, which is used as the denominator for the gradient
         3) logging outputs to display while training
         """
+        if self.init_seg_with_text and self.iter == -1:
+            # Do lazy initializations;
+            def encode_text(text):
+                line = [self.task.bpe.encode(' {}'.format(word.strip())) for word in text.strip().split()]
+                line = ' '.join(line)
+                
+                s = self.task.tgt_dict.encode_line(
+                    line=line,
+                    add_if_not_exist=False,
+                    append_eos=False
+                ).long()
+                return s
+            
+            with torch.no_grad():
+                id2text = [encode_text(f" {x}") for x in CLASSES]
+                id2text_tokens = torch.cat(id2text).cuda()
+                
+                text_length = torch.tensor([len(x) for x in id2text])
+                start_offset = torch.cat([text_length.new_zeros(size=(1, ), dtype=torch.long), text_length.cumsum(dim=0)[:-1]], dim=0).cuda()
+                
+                avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
+                model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
+            logger.info("Initialized seg tokens with embedding bag.")
+
         # 20221006 수정사항
         # count effective iterations given iter and criterion_update_freq
         if model.training:
@@ -286,17 +341,21 @@ class SegCriterionMLP(FairseqCriterion):
         
         if self.use_centering:
             # send centering buffers to a gpu device, if applicable
-            self.center = self.center.to('cuda')
-            self.center_accumulation = self.center_accumulation.to('cuda')
-            self.center_batch_size = self.center_batch_size.to('cuda')
+            self.center = self.center.cuda()
+            self.center_accumulation = self.center_accumulation.cuda()
+            self.center_batch_size = self.center_batch_size.cuda()
             
         if self.use_rdrop:
             construct_rdrop_sample(sample)
         
         if self.alpha != 1.0:
             net_output = model(**sample["net_input"], aux_input=sample["aux_input"])
-            text_output = [net_output[0][:, 1024:].contiguous()]
-            labeled_loss = self.compute_labeled_loss(model, text_output, sample, update_num, reduce=reduce)
+            aux_output = net_output[1]['aux_output']
+            
+            labeled_loss = self.compute_labeled_loss(model, aux_output, sample, update_num, reduce=reduce)
+            
+            # text_output = [net_output[0][:, 1024:].contiguous()]
+            # labeled_loss = self.compute_labeled_loss(model, text_output, sample, update_num, reduce=reduce)
             
         else:
             net_output = model(**sample["net_input"])
@@ -307,9 +366,7 @@ class SegCriterionMLP(FairseqCriterion):
         else:
             compute_seg_loss = self.compute_loss
         
-        image_output = [net_output[0][:, :1024].contiguous()]
-        
-        seg_loss, nll_loss, threshold_mask, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union = compute_seg_loss(model, image_output, sample, update_num, reduce=reduce)
+        seg_loss, nll_loss, threshold_mask, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce)
         
         loss = (1.0 - alpha_coefficient) * labeled_loss + alpha_coefficient * seg_loss
         sample_size = (
@@ -346,18 +403,18 @@ class SegCriterionMLP(FairseqCriterion):
             logging_output["total"] = utils.item(total.data)
         return loss, sample_size, logging_output
 
-    def get_lprobs_and_target(self, model, net_output, sample, return_logit=False):
+    def get_lprobs_and_target(self, model, logits, sample, return_logit=False):
         conf = sample['conf'][:, None, None] if 'conf' in sample and sample['conf'] is not None else 1
         constraint_masks = None
         if "constraint_masks" in sample and sample["constraint_masks"] is not None:
             constraint_masks = sample["constraint_masks"]
-            net_output[0].masked_fill_(~constraint_masks, -math.inf)
+            logits.masked_fill_(~constraint_masks, -math.inf)
         if self.constraint_start is not None and self.constraint_end is not None:
-            net_output[0][:, :, 4:self.constraint_start] = -math.inf
-            net_output[0][:, :, self.constraint_end:] = -math.inf
+            logits[:, :, 4:self.constraint_start] = -math.inf
+            logits[:, :, self.constraint_end:] = -math.inf
         # lprobs = model.get_normalized_probs(net_output, log_probs=True) * conf
         
-        logits = net_output[0].float()
+        logits = logits.float()
         logits_lowres = logits
         
         # logits_ = logits[:, :-1]
@@ -367,6 +424,7 @@ class SegCriterionMLP(FairseqCriterion):
         logits = rearrange(logits_, 'b d h w -> b (h w) d')
         # logits = torch.cat([logits_, logits[:, -1:]], dim=1)
 
+        # remove eos tokens
         target_lowres = sample["downsampled_target"][:, :-1]
         target = sample["target"][:, :-1]
         
@@ -412,9 +470,12 @@ class SegCriterionMLP(FairseqCriterion):
         
     def compute_labeled_loss(self, model, net_output, sample, update_num, reduce=True):
         # lprobs = model.get_normalized_probs(net_output, log_probs=False)
-        logits = net_output[0][:, 1:-1].float() # remove bos and eos
-        target = sample.get('text_target')
-
+        # logits = net_output[0][:, 1:-1].float() # remove bos and eos
+        
+        logits = net_output[0][:, :1024].float()
+        target = sample.get('text2seg_target')
+        target = target[:, :-1]
+        
         # logits = logits[:, :-1]  # remove eos
         # target = target[:, :-1]
         
@@ -437,9 +498,8 @@ class SegCriterionMLP(FairseqCriterion):
         return loss
 
     def compute_unlabled_kld_loss(self, model, net_output, sample, update_num, reduce=True):
-        bsz = net_output[0].size(0)
-        
-        logits, target, logits_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample, return_logit=True)
+        logits = net_output[0][:, :1024].contiguous()
+        logits, target, logits_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, logits, sample, return_logit=True)
         
         assert self.ignore_eos
         mask = torch.logical_and(target != self.padding_idx, target != (self.seg_id_offset+150))

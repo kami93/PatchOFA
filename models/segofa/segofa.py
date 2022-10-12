@@ -142,7 +142,7 @@ class SegOFAModel(TransformerModel):
                 aux_input.get("prev_output_tokens"),
                 encoder_out=aux_encoder_out,
                 src_lengths=aux_input.get("src_lengths"),
-                decoder_type='surrogate',
+                decoder_type='mlp',
             )
             
             extra['aux_output'] = aux_output

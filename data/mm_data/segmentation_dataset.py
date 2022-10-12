@@ -205,7 +205,7 @@ class SegmentationDataset(OFADataset):
         self.neg_tgt_item = self.encode_text(" no")
         
         self.id2text = [self.encode_text(f" {x}") for x in CLASSES]
-        self.text_length = [len(x) for x in self.id2text]
+        self.text_length = torch.tensor([len(x) for x in self.id2text])
         
 
     def encode_text(self, text, length=None, append_bos=False, append_eos=False, use_bpe=True):
@@ -295,11 +295,17 @@ class SegmentationDataset(OFADataset):
             import pdb; pdb.set_trace()
             abc = 1
 
-        src_item = torch.cat(self.id2text)
-        src_item = torch.cat([self.bos_item, src_item, self.eos_item])
+        src_item = torch.cat([self.bos_item, self.seg2code[:150], self.eos_item])
         
-        text_target = torch.stack([self.seg2code[i] for i in range(150) for _ in range(self.text_length[i])])
+        text_target = None
+        # text_target = self.seg2code[:150].repeat_interleave(repeats=self.text_length, dim=0)
         
+        # target_on_final_token = False
+        # if target_on_final_token:
+        #     fill_idx = self.text_length[:150].cumsum(dim=0)-1
+        #     text_target = text_target.new_full(size=text_target.size(), fill_value=self.pad, dtype=torch.long)
+        #     text_target[fill_idx] = self.seg2code[:150]
+            
         gt_semantic_seg_downsampled = self.downsample_gt_seg(gt_semantic_seg.unsqueeze(0))
         seg_ids = self.seg2code[gt_semantic_seg.flatten()]
         seg_ids_downsampled = self.seg2code[gt_semantic_seg_downsampled.flatten()]
@@ -319,7 +325,7 @@ class SegmentationDataset(OFADataset):
             "prev_output_tokens": prev_output_item
         }
 
-        if False:
+        if True:
             rand = np.random.choice(150, size=1024, replace=True)
             code = self.seg2code[rand]
 

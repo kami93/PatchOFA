@@ -353,7 +353,30 @@ class TransformerEncoder(FairseqEncoder):
     ):
         # embed tokens and positions
         if token_embedding is None:
-            token_embedding = self.embed_tokens(src_tokens)
+            bsz, length = src_tokens.size()
+            src_tokens_flat = src_tokens.flatten()
+            
+            offset = self.dictionary.index('<seg_0>')
+            mask = src_tokens_flat < offset
+            
+            lang_tokens = src_tokens_flat[mask]
+            lang_embedding = self.embed_tokens(lang_tokens)
+            
+            seg_tokens = src_tokens_flat[~mask] - offset
+            seg_embedding = self.seg_embed_tokens(seg_tokens)
+            
+            token_embedding = torch.cat([lang_embedding, seg_embedding], dim=0)
+            
+            all_idx = torch.arange(bsz*length)
+            lang_idx = all_idx[mask]
+            seg_idx = all_idx[~mask]
+            restore_idx = torch.cat([lang_idx, seg_idx], dim=0).argsort()
+            
+            token_embedding = token_embedding[restore_idx]
+            token_embedding = token_embedding.reshape(bsz, length, -1)
+        
+            # token_embedding = self.embed_tokens(src_tokens)
+            
         x = embed = self.embed_scale * token_embedding
         if self.entangle_position_embedding and pos_embed is not None:
             x += pos_embed
@@ -527,7 +550,29 @@ class TransformerEncoder(FairseqEncoder):
 
         # embed tokens and positions
         if token_embeddings is None:
-            token_embeddings = self.embed_tokens(src_tokens)
+            bsz, length = src_tokens.size()
+            src_tokens_flat = src_tokens.flatten()
+            
+            offset = self.dictionary.index('<seg_0>')
+            mask = src_tokens_flat < offset
+            
+            lang_tokens = src_tokens_flat[mask]
+            lang_embedding = self.embed_tokens(lang_tokens)
+            
+            seg_tokens = src_tokens_flat[~mask] - offset
+            seg_embedding = self.seg_embed_tokens(seg_tokens)
+            
+            token_embeddings = torch.cat([lang_embedding, seg_embedding], dim=0)
+            
+            all_idx = torch.arange(bsz*length)
+            lang_idx = all_idx[mask]
+            seg_idx = all_idx[~mask]
+            restore_idx = torch.cat([lang_idx, seg_idx], dim=0).argsort()
+            
+            token_embeddings = token_embeddings[restore_idx]
+            token_embeddings = token_embeddings.reshape(bsz, length, -1)
+            
+            # token_embeddings = self.embed_tokens(src_tokens)
                 
         x = embed = self.embed_scale * token_embeddings
         if self.entangle_position_embedding and pos_embed is not None:
