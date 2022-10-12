@@ -316,15 +316,12 @@ class SegCriterionMLP(FairseqCriterion):
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
         
-        abs_center = self.center.abs()
         logging_output = {
             "loss": loss.data,
             "labeled_loss": labeled_loss.data,
             "nll_loss": nll_loss.data,
             "alpha_coefficient": alpha_coefficient, # 20221006 수정사항: alpha coefficient 로깅
             "threshold_mask_ratio": threshold_mask.sum() / threshold_mask.numel(),
-            "abs_center_max": abs_center.max(),
-            "abs_center_mean": abs_center.mean(),
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
@@ -337,6 +334,12 @@ class SegCriterionMLP(FairseqCriterion):
             "area_label": area_label.data,
             "area_union": area_union.data
         }
+        
+        if self.use_centering:
+            abs_center = self.center.abs()
+            logging_output["abs_center_max"] = abs_center.max()
+            logging_output["abs_center_mean"] = abs_center.mean()
+        
         if self.report_accuracy:
             n_correct, total = self.compute_accuracy(model, net_output, sample)
             logging_output["n_correct"] = utils.item(n_correct.data)
