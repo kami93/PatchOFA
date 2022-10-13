@@ -10,11 +10,14 @@ from typing import Optional
 import torch.distributed as dist
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
 from einops import rearrange
 from mmseg.ops import resize
+
+from timm.models.layers import trunc_normal_
 
 from fairseq import metrics, utils
 from fairseq.criterions import FairseqCriterion, register_criterion
@@ -103,6 +106,9 @@ class SegCriterionV3Config(FairseqDataclass):
     )
     unlabeled_target: str = field(
         default='self', metadata={"help": "self | gt | cosine"}
+    )
+    unlabeled_head_type: str = field(
+        default='shared', metadata={"help": "shared | mlp"}
     )
     
 def resolve_str_true_false(x):
@@ -211,7 +217,8 @@ class SegCriterionV3(FairseqCriterion):
         hard_rampup_iter=0,
         freeze_embedding_iter=-1,
         full_context_alignment='false',
-        unlabeled_target='self'
+        unlabeled_target='self',
+        unlabeled_head_type='shared'
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -243,6 +250,7 @@ class SegCriterionV3(FairseqCriterion):
         self.full_context_alignment = resolve_str_true_false(full_context_alignment)
         
         self.unlabeled_target = unlabeled_target
+        self.unlabeled_head_type = unlabeled_head_type
         
         self.seg_id_offset = task.target_dictionary.index("<seg_0>")
         self.constraint_start = None
@@ -252,7 +260,14 @@ class SegCriterionV3(FairseqCriterion):
             self.constraint_start = int(constraint_start)
             self.constraint_end = int(constraint_end)
         
-        output_classes = 150
+        if self.unlabeled_head_type == 'shared':
+            output_classes = 150
+        elif self.unlabeled_head_type == 'separate':
+            output_classes = 150
+            self.unlabeled_head = DINOHead(in_dim=256, out_dim=output_classes, use_bn=False, nlayers=3, hidden_dim=256, bottleneck_dim=64)
+        else:
+            raise NotImplementedError
+                
         if self.use_centering:
             self.register_buffer("center", torch.zeros(size=(1, output_classes))) # self.center
             self.register_buffer("center_accumulation", torch.zeros(size=(1, output_classes)), persistent=False) # tmp buffer for accumulated updates. # self.center_accumulation
@@ -356,26 +371,40 @@ class SegCriterionV3(FairseqCriterion):
             logging_output["total"] = utils.item(total.data)
         return loss, sample_size, logging_output
 
-    def get_lprobs_and_target(self, model, net_output, sample, return_logit=False):
-        conf = sample['conf'][:, None, None] if 'conf' in sample and sample['conf'] is not None else 1
-        constraint_masks = None
-        if "constraint_masks" in sample and sample["constraint_masks"] is not None:
-            constraint_masks = sample["constraint_masks"]
-            net_output[0].masked_fill_(~constraint_masks, -math.inf)
-        if self.constraint_start is not None and self.constraint_end is not None:
-            net_output[0][:, :, 4:self.constraint_start] = -math.inf
-            net_output[0][:, :, self.constraint_end:] = -math.inf
-        # lprobs = model.get_normalized_probs(net_output, log_probs=True) * conf
-        
-        logits = net_output[0].float()
-        logits_lowres = logits
-        
+    
+    def upsample_logits(self, logits):
         logits_ = logits[:, :-1]
         logits_ = rearrange(logits_, 'b (h w) d -> b d h w', h=32, w=32)
         logits_ = resize(logits_, size=(512, 512), mode='bilinear', align_corners=False)
         logits_ = rearrange(logits_, 'b d h w -> b (h w) d')
         logits = torch.cat([logits_, logits[:, -1:]], dim=1)
-
+        
+        return logits
+    
+    def reshape_logits_and_target(self, model, logits, sample, alt_logits=None):
+        conf = sample['conf'][:, None, None] if 'conf' in sample and sample['conf'] is not None else 1
+        constraint_masks = None
+        if "constraint_masks" in sample and sample["constraint_masks"] is not None:
+            constraint_masks = sample["constraint_masks"]
+            logits.masked_fill_(~constraint_masks, -math.inf)
+            if alt_logits is not None:
+                alt_logits.masked_fill_(~constraint_masks, -math.inf)
+            
+        if self.constraint_start is not None and self.constraint_end is not None:
+            logits[:, :, 4:self.constraint_start] = -math.inf
+            logits[:, :, self.constraint_end:] = -math.inf
+            if alt_logits is not None:
+                logits[:, :, 4:self.constraint_start] = -math.inf
+                logits[:, :, self.constraint_end:] = -math.inf
+        # lprobs = model.get_normalized_probs(net_output, log_probs=True) * conf
+        
+        logits_lowres = logits = logits.float()
+        logits = self.upsample_logits(logits)
+        
+        if alt_logits is not None:
+            alt_logits_lowres = alt_logits = alt_logits.float()
+            alt_logits = self.upsample_logits(alt_logits)
+            
         target_lowres = sample["downsampled_target"]
         target = sample["target"]
         
@@ -391,26 +420,112 @@ class SegCriterionV3(FairseqCriterion):
             eos_indices = target_lowres.eq(self.task.tgt_dict.eos())
             logits_lowres = logits_lowres[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
             target_lowres = target_lowres[~eos_indices].reshape(bsz, seq_len-1)
-
+            if alt_logits is not None:
+                alt_logits_lowres = alt_logits_lowres[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
+            
             bsz, seq_len, embed_dim = logits.size()
             eos_indices = target.eq(self.task.tgt_dict.eos())
             logits = logits[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
             target = target[~eos_indices].reshape(bsz, seq_len-1)
+            if alt_logits is not None:
+                alt_logits = alt_logits[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
 
-        if return_logit:
-            lprobs = logits
-            lprobs_lowres = logits_lowres
-        else:
-            lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
-            lprobs_lowres = F.log_softmax(logits_lowres, dim=-1, dtype=torch.float32)
-
+        logits = logits.reshape(-1, logits.size(-1))
+        logits_lowres = logits_lowres.reshape(-1, logits_lowres.size(-1))
+        
+        target = target.reshape(-1)
+        target_lowres = target_lowres.reshape(-1)
+        
+        if alt_logits is not None:
+            alt_logits = alt_logits.reshape(-1, alt_logits.size(-1))
+            alt_logits_lowres = alt_logits_lowres.reshape(-1, alt_logits_lowres.size(-1))
+        
+        mask = torch.logical_and(target != self.padding_idx, target != (self.seg_id_offset+150))
+        logits = logits[mask]
+        target = target[mask]
+        target = target - self.seg_id_offset
+        
+        mask_lowres = torch.logical_and(target_lowres != self.padding_idx, target_lowres != (self.seg_id_offset+150))
+        logits_lowres = logits_lowres[mask_lowres]
+        target_lowres = target_lowres[mask_lowres]
+        target_lowres = target_lowres - self.seg_id_offset
+       
+        logits = [logits, logits_lowres]
+        target = [target, target_lowres]
+        
+        if alt_logits is not None:
+            alt_logits_lowres = alt_logits_lowres[mask_lowres]
+            alt_logits = alt_logits[mask]
+            
+            alt_logits = [alt_logits, alt_logits_lowres]
+            
         #     if constraint_masks is not None:
         #         constraint_masks = constraint_masks[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
 
         # if constraint_masks is not None:
         #     constraint_masks = constraint_masks.view(-1, constraint_masks.size(-1))
+
+        if alt_logits is not None:
+            return logits, target, constraint_masks, alt_logits
+        
+        else:
+            return logits, target, constraint_masks
+
+    # def get_lprobs_and_target(self, model, net_output, sample, return_logit=False):
+    #     conf = sample['conf'][:, None, None] if 'conf' in sample and sample['conf'] is not None else 1
+    #     constraint_masks = None
+    #     if "constraint_masks" in sample and sample["constraint_masks"] is not None:
+    #         constraint_masks = sample["constraint_masks"]
+    #         net_output[0].masked_fill_(~constraint_masks, -math.inf)
+    #     if self.constraint_start is not None and self.constraint_end is not None:
+    #         net_output[0][:, :, 4:self.constraint_start] = -math.inf
+    #         net_output[0][:, :, self.constraint_end:] = -math.inf
+    #     # lprobs = model.get_normalized_probs(net_output, log_probs=True) * conf
+        
+    #     logits = net_output[0].float()
+    #     logits_lowres = logits
+        
+    #     logits_ = logits[:, :-1]
+    #     logits_ = rearrange(logits_, 'b (h w) d -> b d h w', h=32, w=32)
+    #     logits_ = resize(logits_, size=(512, 512), mode='bilinear', align_corners=False)
+    #     logits_ = rearrange(logits_, 'b d h w -> b (h w) d')
+    #     logits = torch.cat([logits_, logits[:, -1:]], dim=1)
+
+    #     target_lowres = sample["downsampled_target"]
+    #     target = sample["target"]
+        
+    #     # if self.ignore_prefix_size > 0:
+    #     #     lprobs = lprobs[:, self.ignore_prefix_size :, :].contiguous()
+    #     #     target = target[:, self.ignore_prefix_size :].contiguous()
             
-        return lprobs.view(-1, lprobs.size(-1)), target.view(-1), lprobs_lowres.view(-1, lprobs_lowres.size(-1)), target_lowres.view(-1), constraint_masks
+    #     #     if constraint_masks is not None:
+    #     #         constraint_masks = constraint_masks[:, self.ignore_prefix_size :, :].contiguous()
+                
+    #     if self.ignore_eos:
+    #         bsz, seq_len, embed_dim = logits_lowres.size()
+    #         eos_indices = target_lowres.eq(self.task.tgt_dict.eos())
+    #         logits_lowres = logits_lowres[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
+    #         target_lowres = target_lowres[~eos_indices].reshape(bsz, seq_len-1)
+
+    #         bsz, seq_len, embed_dim = logits.size()
+    #         eos_indices = target.eq(self.task.tgt_dict.eos())
+    #         logits = logits[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
+    #         target = target[~eos_indices].reshape(bsz, seq_len-1)
+
+    #     if return_logit:
+    #         lprobs = logits
+    #         lprobs_lowres = logits_lowres
+    #     else:
+    #         lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+    #         lprobs_lowres = F.log_softmax(logits_lowres, dim=-1, dtype=torch.float32)
+
+    #     #     if constraint_masks is not None:
+    #     #         constraint_masks = constraint_masks[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
+
+    #     # if constraint_masks is not None:
+    #     #     constraint_masks = constraint_masks.view(-1, constraint_masks.size(-1))
+            
+    #     return lprobs.view(-1, lprobs.size(-1)), target.view(-1), lprobs_lowres.view(-1, lprobs_lowres.size(-1)), target_lowres.view(-1), constraint_masks
         
     def compute_labeled_loss(self, model, net_output, sample, update_num, reduce=True):
         # lprobs = model.get_normalized_probs(net_output, log_probs=False)
@@ -446,32 +561,28 @@ class SegCriterionV3(FairseqCriterion):
         return loss
 
     def compute_unlabled_kld_loss(self, model, net_output, sample, update_num, reduce=True):
-        logits, target, logits_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample, return_logit=True)
-        
-        bsz = sample['net_input']['patch_images'].size(0)
+        classifier_logits, extra = net_output
+        if self.unlabeled_head_type == 'shared':
+            [logits, logits_lowres], [target, target_lowres], constraint_masks = self.reshape_logits_and_target(model, classifier_logits, sample)
+            classifier_logits = logits
+            classifier_logits_lowres = logits_lowres
+                        
+        elif self.unlabeled_head_type == 'separate':
+            features = extra.get('penultimate')
+            separate_logits = self.unlabeled_head(features)
+            
+            [logits, logits_lowres], [target, target_lowres], constraint_masks, [classifier_logits, classifier_logits_lowres] = self.reshape_logits_and_target(model, separate_logits, sample, alt_logits=classifier_logits)
+
         assert self.ignore_eos
-        
-        mask = torch.logical_and(target != self.padding_idx, target != (self.seg_id_offset+150))
-        logits = logits[mask]
-        target = target[mask]
-        target = target - self.seg_id_offset
-        
-        mask_lowres = torch.logical_and(target_lowres != self.padding_idx, target_lowres != (self.seg_id_offset+150))
-        logits_lowres = logits_lowres[mask_lowres]
-        target_lowres = target_lowres[mask_lowres]
-        target_lowres = target_lowres - self.seg_id_offset
         
         if self.upscale_lprobs:
             logits_train = logits
             target_train = target
+            
         else:
             logits_train = logits_lowres
             target_train = target_lowres
-        
-        # calculate true nll loss
-        with torch.no_grad():
-            nll_loss = F.cross_entropy(logits_train.detach(), target_train.detach())
-        
+                    
         student_logits = logits_train / self.student_temperature
         with torch.no_grad():
             if self.use_centering:
@@ -515,19 +626,25 @@ class SegCriterionV3(FairseqCriterion):
                 teacher = F.softmax(logits_teacher, dim=-1)
 
         unlabeled_loss = (F.cross_entropy(student_logits, teacher.detach(), label_smoothing=self.eps, reduction='none') * threshold_mask).mean()
-        
         ntokens = 1
-        unlabeled_loss = unlabeled_loss.mean()
 
-        area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(logits_lowres, target_lowres)
-        area_intersect, area_pred_label, area_label, area_union = self.compute_metric(logits, target)
+        with torch.no_grad():
+            nll_loss = F.cross_entropy(classifier_logits_lowres.detach(), target_lowres.detach()) # just for display
+            area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_logits_lowres.detach(), target_lowres.detach())
+            area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_logits.detach(), target.detach())
         
         return unlabeled_loss, nll_loss, threshold_mask, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
 
     def compute_loss(self, model, net_output, sample, update_num, reduce=True):
-        lprobs, target, lprobs_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample)
+        # lprobs, target, lprobs_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample)
         # if constraint_masks is not None:
         #     constraint_masks = constraint_masks[target != self.padding_idx]
+        
+        logits = net_output[0]
+        
+        logits, target, logits_lowres, target_lowres, constraint_masks = self.reshape_logits_and_target(model, logits, sample)
+        lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+        lprobs_lowres = F.log_softmax(logits_lowres, dim=-1, dtype=torch.float32)
         
         bsz = sample['net_input']['patch_images'].size(0)
         assert self.ignore_eos
@@ -775,6 +892,40 @@ class SegCriterionV3(FairseqCriterion):
         to True will improves distributed training speed.
         """
         return True
+
+class DINOHead(nn.Module):
+    def __init__(self, in_dim, out_dim, use_bn=False, nlayers=3, hidden_dim=256, bottleneck_dim=64):
+        super().__init__()
+        nlayers = max(nlayers, 1)
+        if nlayers == 1:
+            self.mlp = nn.Linear(in_dim, bottleneck_dim)
+        else:
+            layers = [nn.Linear(in_dim, hidden_dim)]
+            if use_bn:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.GELU())
+            for _ in range(nlayers - 2):
+                layers.append(nn.Linear(hidden_dim, hidden_dim))
+                if use_bn:
+                    layers.append(nn.BatchNorm1d(hidden_dim))
+                layers.append(nn.GELU())
+            layers.append(nn.Linear(hidden_dim, bottleneck_dim))
+            self.mlp = nn.Sequential(*layers)
+        
+        self.last_layer = nn.Linear(bottleneck_dim, out_dim, bias=False)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.mlp(x)
+        x = nn.functional.normalize(x, dim=-1, p=2)
+        x = self.last_layer(x)
+        return x
 
 def is_dist_avail_and_initialized():
     if not dist.is_available():

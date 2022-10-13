@@ -298,6 +298,11 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
     def output_projection(self, features):
         # Special output projection for supervised segmentation task
+        
+        if self.l2_normalized_seg:
+            # Apply L2 Norm
+            features = nn.functional.normalize(features, dim=-1, p=2)
+            
         proj = self.seg_projection(features)
         
         return proj
@@ -454,18 +459,10 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             alignment_heads=alignment_heads,
         )
 
-        # Apply L2 Norm
-        if self.l2_normalized_seg:
-            x = nn.functional.normalize(x, dim=-1, p=2)
-
+        extra['penultimate'] = x
         if not features_only:
             x = self.output_layer(x)
-            # if text2seg_decoding:
-            #     x = F.linear(x, self.embed_tokens.weight)
 
-            # else:
-            #     x = self.output_layer(x)
-            
         return x, extra
 
     def extract_features(
