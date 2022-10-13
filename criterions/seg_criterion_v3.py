@@ -325,15 +325,13 @@ class SegCriterionV3(FairseqCriterion):
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
         
-        abs_center = self.center.abs()
         logging_output = {
             "loss": loss.data,
             "labeled_loss": labeled_loss.data,
+            "seg_loss": seg_loss.data,
             "nll_loss": nll_loss.data,
             "alpha_coefficient": alpha_coefficient, # 20221006 수정사항: alpha coefficient 로깅
             "threshold_mask_ratio": threshold_mask.sum() / threshold_mask.numel(),
-            "abs_center_max": abs_center.max(),
-            "abs_center_mean": abs_center.mean(),
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
@@ -346,6 +344,12 @@ class SegCriterionV3(FairseqCriterion):
             "area_label": area_label.data,
             "area_union": area_union.data
         }
+
+        if self.use_centering:
+            abs_center = self.center.abs()
+            logging_output["abs_center_max"] = abs_center.max()
+            logging_output["abs_center_mean"] = abs_center.mean()
+        
         if self.report_accuracy:
             n_correct, total = self.compute_accuracy(model, net_output, sample)
             logging_output["n_correct"] = utils.item(n_correct.data)
@@ -464,6 +468,10 @@ class SegCriterionV3(FairseqCriterion):
             logits_train = logits_lowres
             target_train = target_lowres
         
+        # calculate true nll loss
+        with torch.no_grad():
+            nll_loss = F.cross_entropy(logits_train.detach(), target_train.detach())
+        
         student_logits = logits_train / self.student_temperature
         with torch.no_grad():
             if self.use_centering:
@@ -514,7 +522,7 @@ class SegCriterionV3(FairseqCriterion):
         area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(logits_lowres, target_lowres)
         area_intersect, area_pred_label, area_label, area_union = self.compute_metric(logits, target)
         
-        return unlabeled_loss, unlabeled_loss, threshold_mask, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
+        return unlabeled_loss, nll_loss, threshold_mask, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
 
     def compute_loss(self, model, net_output, sample, update_num, reduce=True):
         lprobs, target, lprobs_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample)
@@ -614,6 +622,7 @@ class SegCriterionV3(FairseqCriterion):
         loss_sum = sum(log.get("loss", 0) for log in logging_outputs)
         nll_loss_sum = sum(log.get("nll_loss", 0) for log in logging_outputs)
         labeled_loss_sum = sum(log.get("labeled_loss", 0) for log in logging_outputs)
+        seg_loss_sum = sum(log.get("seg_loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
@@ -640,6 +649,9 @@ class SegCriterionV3(FairseqCriterion):
         )
         metrics.log_scalar(
             "labeled_loss", labeled_loss_sum / sample_size, ntokens, round=3
+        )
+        metrics.log_scalar(
+            "seg_loss", seg_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_scalar(
             "nll_loss", nll_loss_sum / sample_size, ntokens, round=3
