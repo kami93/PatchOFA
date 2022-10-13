@@ -77,6 +77,7 @@ class SegOFAModel(TransformerModel):
         code_masks: Optional[torch.Tensor] = None,
         sample_patch_num: Optional[int] = None,
         features_only: bool = False,
+        full_context_alignment: bool = False,
         classification_head_name: Optional[str] = None,
         token_embeddings: Optional[torch.Tensor] = None,
         return_all_hiddens: bool = False,
@@ -107,11 +108,11 @@ class SegOFAModel(TransformerModel):
             code_masks=code_masks,
             encoder_out=encoder_out,
             features_only=features_only,
+            full_context_alignment=full_context_alignment,
             alignment_layer=alignment_layer,
             alignment_heads=alignment_heads,
             src_lengths=src_lengths,
-            return_all_hiddens=return_all_hiddens,
-            decoder_type='mlp',
+            return_all_hiddens=return_all_hiddens
         )
         extra['encoder_returns'] = encoder_out
 
@@ -141,8 +142,7 @@ class SegOFAModel(TransformerModel):
             aux_output = self.decoder(
                 aux_input.get("prev_output_tokens"),
                 encoder_out=aux_encoder_out,
-                src_lengths=aux_input.get("src_lengths"),
-                decoder_type='mlp',
+                src_lengths=aux_input.get("src_lengths")
             )
             
             extra['aux_output'] = aux_output

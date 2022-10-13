@@ -98,6 +98,12 @@ class SegCriterionV3Config(FairseqDataclass):
         default=-1, metadata={
             "help": "Freeze the token embedding after this iteration (ignored if -1). ``effective iteration'' (1 iter per N update-freq) is used."}
     )
+    full_context_alignment: str = field(
+        default='false', metadata={"help": "whether to apply full attention in decoder"}
+    )
+    unlabeled_target: str = field(
+        default='self', metadata={"help": "self | gt | cosine"}
+    )
     
 def resolve_str_true_false(x):
     x = x.lower()
@@ -204,6 +210,8 @@ class SegCriterionV3(FairseqCriterion):
         criterion_update_freq=1,
         hard_rampup_iter=0,
         freeze_embedding_iter=-1,
+        full_context_alignment='false',
+        unlabeled_target='self'
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -232,6 +240,9 @@ class SegCriterionV3(FairseqCriterion):
         self.use_centering = resolve_str_true_false(use_centering)
         self.upscale_lprobs = resolve_str_true_false(upscale_lprobs)
         self.unsupervised_segmentation = resolve_str_true_false(unsupervised_segmentation)
+        self.full_context_alignment = resolve_str_true_false(full_context_alignment)
+        
+        self.unlabeled_target = unlabeled_target
         
         self.seg_id_offset = task.target_dictionary.index("<seg_0>")
         self.constraint_start = None
@@ -294,7 +305,7 @@ class SegCriterionV3(FairseqCriterion):
             construct_rdrop_sample(sample)
         
         if self.alpha != 1.0:
-            net_output = model(**sample["net_input"], aux_input=sample["aux_input"])
+            net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment, aux_input=sample["aux_input"])
             labeled_output = net_output[1].get("aux_output")
             labeled_loss = self.compute_labeled_loss(model, labeled_output, sample, update_num, reduce=reduce)
             
@@ -407,9 +418,13 @@ class SegCriterionV3(FairseqCriterion):
         
         logits = logits.reshape(-1, logits.size(-1))
         target = target.reshape(-1)
-        
-        logits = logits[target != self.padding_idx]
-        target = target[target != self.padding_idx]
+
+        mask = torch.logical_and(target != self.padding_idx, target != (self.seg_id_offset+150))
+        logits = logits[mask]
+        target = target[mask]
+
+        # logits = logits[target != self.padding_idx]
+        # target = target[target != self.padding_idx]
         
         target = target - self.seg_id_offset
 
@@ -457,6 +472,29 @@ class SegCriterionV3(FairseqCriterion):
                 logits_teacher = (logits_train - self.center)
             else:
                 logits_teacher = logits_train
+            
+            if self.unlabeled_target == 'gt':
+                len_target = len(target_train)
+                mask = target_train.unsqueeze(0) == target_train.unsqueeze(1)
+                # mask.diagonal()[:] = False
+                
+                rand = torch.randn(size=(len_target, len_target), device=target_train.device)
+                perm = rand.argsort(-1)
+                
+                batch_idx_1d = torch.arange(len_target)
+                batch_idx_2d = batch_idx_1d.unsqueeze(-1).expand(-1, len_target)
+
+                mask_perm = mask[batch_idx_2d, perm]
+                random_choice = mask_perm.max(-1)[1]
+                
+                target_teacher = perm[batch_idx_1d, random_choice]
+                logits_teacher = logits_teacher[target_teacher]
+            
+            elif self.unlabeled_target == 'self':
+                pass
+            
+            elif self.unlabeled_target == 'cosine':
+                raise NotImplementedError
             
             pred = F.softmax(logits_teacher, dim=-1)
             max_value, max_index = pred.max(1)

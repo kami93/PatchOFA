@@ -306,8 +306,10 @@ class TransformerModel(FairseqEncoderDecoderModel):
         
         parser.add_argument('--num-seg-tokens', type=int, default=150,
                             help='Number of segmentation tokens')
-        parser.add_argument('--use-mlp-decoder', type=str, default='false',
-                            help='Use MLP decoder instread of OFA transformer decoder.')
+        parser.add_argument('--decoder-type', type=str, default='ofa',
+                            help='mlp | ofa')
+        parser.add_argument('--tie-seg-projection', type=str, default='true',
+                            help='Whether to tie the seg projection weights with seg tokens')
         # fmt: on
 
     @classmethod
@@ -430,6 +432,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
         features_only: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
+        full_context_alignment: bool = False,
         text2seg_decoding: bool = False,
     ):
         """
@@ -445,6 +448,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
             prev_output_tokens,
             encoder_out=encoder_out,
             features_only=features_only,
+            full_context_alignment=full_context_alignment,
             alignment_layer=alignment_layer,
             alignment_heads=alignment_heads,
             src_lengths=src_lengths,

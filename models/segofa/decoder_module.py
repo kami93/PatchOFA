@@ -123,21 +123,22 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         self.no_grad_image = resolve_str_true_false(args.no_grad_image)
         self.l2_normalized_seg = resolve_str_true_false(args.l2_normalized_seg)
-        self.use_mlp_decoder = resolve_str_true_false(args.use_mlp_decoder)
+        tie_seg_projection = resolve_str_true_false(args.tie_seg_projection)
         
         embed_dim = args.decoder_embed_dim
         self.seg_embed_tokens = seg_embed_tokens
         
         num_seg_tokens = 150
         self.seg_projection = Linear(embed_dim, num_seg_tokens, bias=False)
-        self.seg_projection.weight = self.seg_embed_tokens.weight
+        if tie_seg_projection:
+            logger.info("Tieing seg projection weight with seg tokens.")
+            self.seg_projection.weight = self.seg_embed_tokens.weight
         
-        if self.use_mlp_decoder:
+        self.decoder_type = args.decoder_type
+        if self.decoder_type == 'mlp':
             self.embed_positions = None
             self.max_target_positions = args.max_target_positions
-            
             self.mlp_decoder = Mlp(in_features=embed_dim, hidden_features=embed_dim, out_features=embed_dim, drop=args.dropout)
-            # self.embed_tokens = embed_tokens
    
         else:
             if getattr(args, "decoder_prompt", False):
@@ -150,8 +151,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                     layers=args.decoder_layers,
                     vocab_size=args.vocab_size)
                 self.decoder_dropout = nn.Dropout(p=0.2)
-
-
 
             self.dropout_module = FairseqDropout(
                 args.dropout, module_name=self.__class__.__name__
@@ -279,6 +278,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.entangle_position_embedding = args.entangle_position_embedding
             
             self.register_buffer("bin_id_offset", torch.tensor([self.dictionary.index("<bin_0>")]))
+            self.register_buffer("seg_id_offset", torch.tensor([self.dictionary.index("<seg_0>")]))
+            
             self.register_buffer("region_prefix", torch.tensor([976,  35])) # "region: "
 
     def get_decoder_prompt(self, prompt_tokens):
@@ -422,8 +423,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
         src_lengths: Optional[Any] = None,
-        return_all_hiddens: bool = False,
-        decoder_type: str = 'original'
+        return_all_hiddens: bool = False
     ):
         """
         Args:
@@ -452,7 +452,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             full_context_alignment=full_context_alignment,
             alignment_layer=alignment_layer,
             alignment_heads=alignment_heads,
-            decoder_type=decoder_type,
         )
 
         # Apply L2 Norm
@@ -478,23 +477,22 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         full_context_alignment: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
-        decoder_type: str = 'original',
     ):
         
-        if decoder_type == 'surrogate':
+        if self.decoder_type == 'surrogate':
             extract_features_scriptable = self.extract_features_scriptable_surrogate
-        elif decoder_type == 'mlp':
-            assert self.use_mlp_decoder
+        elif self.decoder_type == 'mlp':
+            assert hasattr(self, 'mlp_decoder')
             extract_features_scriptable = self.extract_features_scriptable_mlp
-        elif decoder_type == 'region':
+        elif self.decoder_type == 'region':
             extract_features_scriptable = self.extract_features_scriptable_region
-        elif decoder_type == 'mask':
+        elif self.decoder_type == 'mask':
             extract_features_scriptable = self.extract_features_scriptable_mask
-        elif decoder_type == 'image_onestep':
+        elif self.decoder_type == 'image_onestep':
             extract_features_scriptable = self.extract_features_scriptable_image_onestep
-        elif decoder_type == 'old':
+        elif self.decoder_type == 'old':
             extract_features_scriptable = self.extract_features_scriptable_old
-        elif decoder_type == 'original':
+        elif self.decoder_type == 'original':
             extract_features_scriptable = self.extract_features_scriptable
         else:
             raise NotImplementedError
@@ -653,7 +651,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                         self_attn_mask = torch.cat([prompt_mask, self_attn_mask], dim=1)
                 else:
                     self_attn_mask = None
-
                 self_attn_bias = self_abs_pos_bias.clone()
         
                 old_rel_pos_bias = self.get_seg_rel_pos_bias(all_prev_output_tokens, idx).unsqueeze(0)
@@ -1814,20 +1811,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         if f"{name}.output_projection.weight" in state_dict:
             state_dict.pop(f"{name}.output_projection.weight")
         
-        if self.use_mlp_decoder:
+        if self.decoder_type == 'mlp':
             pass
-        #     for key in list(state_dict.keys()):
-        #         if key == 'decoder.version':
-        #             continue
-        #         # if key == 'decoder.embed_tokens.weight':
-        #         #     continue
-        #         if key.startswith(name):
-        #             state_dict.pop(key)
-                    
-        #     for key, value in self.mlp_decoder.state_dict():
-        #         state_dict[f'{name}.{key}'] = value
-                
-            
+        
         else:
             for i in range(self.num_layers):
                 # update layer norms

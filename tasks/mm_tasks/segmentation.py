@@ -70,6 +70,18 @@ class SegmentationConfig(OFAConfig):
             "help": 'generation args for Self-critical sequence training, as JSON string'
         },
     )
+    fakeimage_type: str = field(
+        default='random',
+        metadata={
+            "help": 'random | gt_seg'
+        },
+    )
+    prompt_type: str = field(
+        default='prompt',
+        metadata={
+            "help": 'prompt | all_seg | gt_seg'
+        },
+    )
 
 @register_task("segmentation", dataclass=SegmentationConfig)
 class SegmentationTask(OFATask):
@@ -131,7 +143,8 @@ class SegmentationTask(OFATask):
             max_tgt_length=self.cfg.max_tgt_length,
             patch_image_size=self.cfg.patch_image_size,
             add_object=self.cfg.add_object,
-            imagenet_default_mean_and_std=self.cfg.imagenet_default_mean_and_std
+            imagenet_default_mean_and_std=self.cfg.imagenet_default_mean_and_std,
+            cfg=self.cfg,
         )
 
     def build_model(self, cfg):

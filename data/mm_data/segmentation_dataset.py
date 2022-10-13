@@ -59,7 +59,7 @@ CLASSES = np.array([
     'dishwasher', 'screen', 'blanket', 'sculpture', 'hood', 'sconce',
     'vase', 'traffic light', 'tray', 'ashcan', 'fan', 'pier', 'crt screen',
     'plate', 'monitor', 'bulletin board', 'shower', 'radiator', 'glass',
-    'clock', 'flag'])
+    'clock', 'flag', 'unknown'])
 
 def collate(samples, pad_idx, eos_idx):
     if len(samples) == 0:
@@ -159,13 +159,16 @@ class SegmentationDataset(OFADataset):
         max_tgt_length=30,
         patch_image_size=224,
         add_object=False,
-        imagenet_default_mean_and_std=True
+        imagenet_default_mean_and_std=True,
+        cfg=None
     ):
         super().__init__(split, dataset, bpe, src_dict, tgt_dict)
         
         self.max_src_length = max_src_length
         self.max_tgt_length = max_tgt_length
         self.patch_image_size = patch_image_size
+
+        self.cfg = cfg
 
         if imagenet_default_mean_and_std:
             mean = IMAGENET_DEFAULT_MEAN
@@ -196,7 +199,7 @@ class SegmentationDataset(OFADataset):
             self.image_transform = Resize(img_scale=(512, 512), keep_ratio=False)
             self.downsample_gt_seg = transforms.Resize(32, transforms.InterpolationMode.NEAREST)
             
-        # self.prompt = self.encode_text(' what is the segmentation of the image?')
+        self.prompt = self.encode_text(' what is the segmentation of the image?')
         
         self.id2seg = np.array([f'<seg_{idx}>' for idx in range(151)])
         self.seg2code = self.encode_text(" ".join(self.id2seg), use_bpe=False)
@@ -206,6 +209,9 @@ class SegmentationDataset(OFADataset):
         
         self.id2text = [self.encode_text(f" {x}") for x in CLASSES]
         self.text_length = torch.tensor([len(x) for x in self.id2text])
+        
+        self.fakeimage_type = cfg.fakeimage_type
+        self.prompt_type = cfg.prompt_type
         
 
     def encode_text(self, text, length=None, append_bos=False, append_eos=False, use_bpe=True):
@@ -295,8 +301,6 @@ class SegmentationDataset(OFADataset):
             import pdb; pdb.set_trace()
             abc = 1
 
-        src_item = torch.cat([self.bos_item, self.seg2code[:150], self.eos_item])
-        
         text_target = None
         # text_target = self.seg2code[:150].repeat_interleave(repeats=self.text_length, dim=0)
         
@@ -306,14 +310,38 @@ class SegmentationDataset(OFADataset):
         #     text_target = text_target.new_full(size=text_target.size(), fill_value=self.pad, dtype=torch.long)
         #     text_target[fill_idx] = self.seg2code[:150]
             
-        gt_semantic_seg_downsampled = self.downsample_gt_seg(gt_semantic_seg.unsqueeze(0))
+        gt_semantic_seg_downsampled = self.downsample_gt_seg(gt_semantic_seg.unsqueeze(0)).flatten()
         seg_ids = self.seg2code[gt_semantic_seg.flatten()]
-        seg_ids_downsampled = self.seg2code[gt_semantic_seg_downsampled.flatten()]
+        seg_ids_downsampled = self.seg2code[gt_semantic_seg_downsampled]
         
         prev_output_item = torch.cat([self.bos_item, seg_ids_downsampled])
         downsampled_target = torch.cat([seg_ids_downsampled, self.eos_item])
         target = torch.cat([seg_ids, self.eos_item])
 
+        # build 
+        if self.prompt_type == 'gt_seg':
+            unique_seg_ids = gt_semantic_seg_downsampled.unique()
+            randperm = torch.randperm(len(unique_seg_ids))
+            unique_seg_ids = unique_seg_ids[randperm]
+            
+            src_text = torch.cat([self.id2text[idx] for idx in unique_seg_ids])
+            src_item = torch.cat([self.bos_item, src_text, self.eos_item])
+
+        # Self-patch teacher index
+        # mask = seg_ids_downsampled.unsqueeze(0) == seg_ids_downsampled.unsqueeze(1)
+        
+        # rand = torch.randn(size=(len(seg_ids_downsampled), len(seg_ids_downsampled)))
+        
+        # batch_idx_1d = torch.arange(len(seg_ids_downsampled))
+        # batch_idx_2d = batch_idx_1d.unsqueeze(-1).expand(-1, len(seg_ids_downsampled))
+        
+        # perm = rand.argsort(-1)
+
+        # mask_perm = mask[batch_idx_2d, perm]
+        # random_choice = mask_perm.max(-1)[1]
+        
+        # target_teacher = perm[batch_idx_1d, random_choice]
+        
         example = {
             "id": uniq_id,
             "source": src_item,
@@ -326,12 +354,24 @@ class SegmentationDataset(OFADataset):
         }
 
         if True:
-            rand = np.random.choice(150, size=1024, replace=True)
-            code = self.seg2code[rand]
+            if self.fakeimage_type == 'gt_seg':
+                text_list = torch.cat([self.id2text[idx] for idx in gt_semantic_seg_downsampled])
+                text_length = torch.tensor([self.text_length[idx] for idx in gt_semantic_seg_downsampled], dtype=torch.long)
+                code = self.seg2code[gt_semantic_seg_downsampled]
+                
+            else:
+                raise False
+                # rand = np.random.choice(150, size=1024, replace=True)
+                # code = self.seg2code[rand]
 
-            text_list = torch.cat([self.id2text[idx] for idx in rand])
-            text_length = torch.tensor([self.text_length[idx] for idx in rand], dtype=torch.long)
-
+            if self.prompt_type == 'gt_seg':
+                unique_seg_ids = gt_semantic_seg_downsampled.unique()
+                randperm = torch.randperm(len(unique_seg_ids))
+                unique_seg_ids = unique_seg_ids[randperm]
+                
+                src_text = torch.cat([self.id2text[idx] for idx in unique_seg_ids])
+                src_item = torch.cat([self.bos_item, src_text, self.eos_item])
+            
             example["text2seg_patch_image"] = text_list
             example["text2seg_patch_mask"] = text_length.cumsum(dim=0)
             example["text2seg_source"] = src_item
