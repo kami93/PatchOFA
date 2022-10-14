@@ -376,6 +376,7 @@ class SegCriterionMLP(FairseqCriterion):
         logging_output = {
             "loss": loss.data,
             "labeled_loss": labeled_loss.data,
+            "seg_loss": seg_loss.data,
             "nll_loss": nll_loss.data,
             "alpha_coefficient": alpha_coefficient, # 20221006 수정사항: alpha coefficient 로깅
             "threshold_mask_ratio": threshold_mask.sum() / threshold_mask.numel(),
@@ -549,7 +550,8 @@ class SegCriterionMLP(FairseqCriterion):
         return unlabeled_loss, unlabeled_loss, threshold_mask, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
 
     def compute_loss(self, model, net_output, sample, update_num, reduce=True):
-        lprobs, target, lprobs_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample)
+        logits = net_output[0][:, :1024].contiguous()
+        lprobs, target, lprobs_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, logits, sample)
         # if constraint_masks is not None:
         #     constraint_masks = constraint_masks[target != self.padding_idx]
         
@@ -591,7 +593,7 @@ class SegCriterionMLP(FairseqCriterion):
         area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(lprobs_lowres, target_lowres)
         area_intersect, area_pred_label, area_label, area_union = self.compute_metric(lprobs, target)
         
-        return loss, nll_loss, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
+        return loss, nll_loss, torch.tensor([1]), ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
 
     def compute_metric(self, lprobs, target):
         num_classes = lprobs.size(-1)
@@ -646,6 +648,7 @@ class SegCriterionMLP(FairseqCriterion):
         loss_sum = sum(log.get("loss", 0) for log in logging_outputs)
         nll_loss_sum = sum(log.get("nll_loss", 0) for log in logging_outputs)
         labeled_loss_sum = sum(log.get("labeled_loss", 0) for log in logging_outputs)
+        seg_loss_sum = sum(log.get("seg_loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
@@ -672,6 +675,9 @@ class SegCriterionMLP(FairseqCriterion):
         )
         metrics.log_scalar(
             "labeled_loss", labeled_loss_sum / sample_size, ntokens, round=3
+        )
+        metrics.log_scalar(
+            "seg_loss", seg_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_scalar(
             "nll_loss", nll_loss_sum / sample_size, ntokens, round=3
