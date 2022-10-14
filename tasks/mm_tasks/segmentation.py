@@ -77,9 +77,15 @@ class SegmentationConfig(OFAConfig):
         },
     )
     prompt_type: str = field(
-        default='prompt',
+        default='all',
         metadata={
-            "help": 'prompt | all_seg | gt_seg'
+            "help": 'prompt | random_all | all | random_20 | gt_seg'
+        },
+    )
+    fakeimage_prompt_type: str = field(
+        default='all',
+        metadata={
+            "help": 'prompt | all | gt_seg'
         },
     )
 

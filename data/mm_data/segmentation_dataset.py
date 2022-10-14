@@ -36,7 +36,7 @@ IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
 CLASSES = np.array([
-    'wall', 'building', 'sky', 'floor', 'tree', 'ceiling', 'road', 'bed ',
+    'wall', 'building', 'sky', 'floor', 'tree', 'ceiling', 'road', 'bed',
     'windowpane', 'grass', 'cabinet', 'sidewalk', 'person', 'earth',
     'door', 'table', 'mountain', 'plant', 'curtain', 'chair', 'car',
     'water', 'painting', 'sofa', 'shelf', 'house', 'sea', 'mirror', 'rug',
@@ -61,6 +61,32 @@ CLASSES = np.array([
     'plate', 'monitor', 'bulletin board', 'shower', 'radiator', 'glass',
     'clock', 'flag', 'unknown'])
 
+# CLASSES2 = np.array([
+#     'barrier', 'construction', 'azure', 'ground', 'wood', 'roof', 'avenue', 'mattress',
+#     'windowframe', 'meadow', 'cabinet', 'sidewalk', 'person', 'earth',
+#     'door', 'table', 'mountain', 'plant', 'curtain', 'chair', 'car',
+#     'water', 'painting', 'sofa', 'shelf', 'house', 'sea', 'mirror', 'rug',
+#     'field', 'armchair', 'seat', 'fence', 'desk', 'rock', 'wardrobe',
+#     'lamp', 'bathtub', 'railing', 'cushion', 'base', 'box', 'column',
+#     'signboard', 'chest of drawers', 'counter', 'sand', 'sink',
+#     'skyscraper', 'fireplace', 'refrigerator', 'grandstand', 'path',
+#     'stairs', 'runway', 'case', 'pool table', 'pillow', 'screen door',
+#     'stairway', 'river', 'bridge', 'bookcase', 'blind', 'coffee table',
+#     'toilet', 'flower', 'book', 'hill', 'bench', 'countertop', 'stove',
+#     'palm', 'kitchen island', 'computer', 'swivel chair', 'boat', 'bar',
+#     'arcade machine', 'hovel', 'bus', 'towel', 'light', 'truck', 'tower',
+#     'chandelier', 'awning', 'streetlight', 'booth', 'television receiver',
+#     'airplane', 'dirt track', 'apparel', 'pole', 'land', 'bannister',
+#     'escalator', 'ottoman', 'bottle', 'buffet', 'poster', 'stage', 'van',
+#     'ship', 'fountain', 'conveyer belt', 'canopy', 'washer', 'plaything',
+#     'swimming pool', 'stool', 'barrel', 'basket', 'waterfall', 'tent',
+#     'bag', 'minibike', 'cradle', 'oven', 'ball', 'food', 'step', 'tank',
+#     'trade name', 'microwave', 'pot', 'animal', 'bicycle', 'lake',
+#     'dishwasher', 'screen', 'blanket', 'sculpture', 'hood', 'sconce',
+#     'vase', 'traffic light', 'tray', 'ashcan', 'fan', 'pier', 'crt screen',
+#     'plate', 'monitor', 'bulletin board', 'shower', 'radiator', 'glass',
+#     'clock', 'flag', 'unknown'])
+
 def collate(samples, pad_idx, eos_idx):
     if len(samples) == 0:
         return {}
@@ -73,8 +99,19 @@ def collate(samples, pad_idx, eos_idx):
         )
 
     id = np.array([s["id"] for s in samples])
+    
     src_tokens = merge("source")
     src_lengths = torch.LongTensor([s["source"].ne(pad_idx).long().sum() for s in samples])
+
+    net_input_aug = None
+    if samples[0].get("source_2", None) is not None:
+        src_tokens_2 = merge("source_2")
+        src_lengths_2 = torch.LongTensor([s["source_2"].ne(pad_idx).long().sum() for s in samples])
+        net_input_aug = {
+            "src_tokens": src_tokens_2,
+            "src_lengths": src_lengths_2
+        }
+
 
     patch_images = torch.stack([sample['patch_image'] for sample in samples], dim=0)
     patch_masks = torch.cat([sample['patch_mask'] for sample in samples])
@@ -136,6 +173,7 @@ def collate(samples, pad_idx, eos_idx):
             "patch_masks": patch_masks,
             "prev_output_tokens": prev_output_tokens
         },
+        "net_input_aug": net_input_aug,
         "aux_input": aux_input,
         "target": target,
         "text_target": text_target,
@@ -212,6 +250,7 @@ class SegmentationDataset(OFADataset):
         
         self.fakeimage_type = cfg.fakeimage_type
         self.prompt_type = cfg.prompt_type
+        self.fakeimage_prompt_type = cfg.fakeimage_prompt_type
         
 
     def encode_text(self, text, length=None, append_bos=False, append_eos=False, use_bpe=True):
@@ -319,6 +358,7 @@ class SegmentationDataset(OFADataset):
         target = torch.cat([seg_ids, self.eos_item])
 
         # build 
+        src_item_2 = None
         if self.prompt_type == 'gt_seg':
             unique_seg_ids = gt_semantic_seg_downsampled.unique()
             randperm = torch.randperm(len(unique_seg_ids))
@@ -326,6 +366,31 @@ class SegmentationDataset(OFADataset):
             
             src_text = torch.cat([self.id2text[idx] for idx in unique_seg_ids])
             src_item = torch.cat([self.bos_item, src_text, self.eos_item])
+        
+        elif self.prompt_type == 'prompt':
+            src_item = torch.cat([self.bos_item, self.prompt, self.eos_item])
+        
+        elif self.prompt_type == 'random_20':
+            if self.split == 'train':
+                rand_idx = np.random.choice(150, size=20)
+                src_text = torch.cat([self.id2text[idx] for idx in rand_idx])
+                src_item = torch.cat([self.bos_item, src_text, self.eos_item]) # src_item is the student (strong aug.)
+                
+                # rand_idx = np.random.choice(150, size=20)
+                src_text = torch.cat([self.id2text[idx] for idx in range(150)])
+                src_item_2 = torch.cat([self.bos_item, src_text, self.eos_item]) # src_item_2 is the teacher (weak aug.)
+            
+            else:
+                # self.prompt_type is 'all' during validation.
+                src_text = torch.cat([self.id2text[idx] for idx in range(150)])
+                src_item = torch.cat([self.bos_item, src_text, self.eos_item])
+            
+        elif self.prompt_type == 'all':
+            src_text = torch.cat([self.id2text[idx] for idx in range(150)])
+            src_item = torch.cat([self.bos_item, src_text, self.eos_item])
+            
+        else:
+            raise NotImplementedError
 
         # Self-patch teacher index
         # mask = seg_ids_downsampled.unsqueeze(0) == seg_ids_downsampled.unsqueeze(1)
@@ -345,6 +410,7 @@ class SegmentationDataset(OFADataset):
         example = {
             "id": uniq_id,
             "source": src_item,
+            "source_2": src_item_2,
             "patch_image": img,
             "patch_mask": patch_mask,
             "target": target,
@@ -359,18 +425,29 @@ class SegmentationDataset(OFADataset):
                 text_length = torch.tensor([self.text_length[idx] for idx in gt_semantic_seg_downsampled], dtype=torch.long)
                 code = self.seg2code[gt_semantic_seg_downsampled]
                 
+            elif self.fakeimage_type == 'random':
+                rand = np.random.choice(150, size=1024, replace=True)
+                text_list = torch.cat([self.id2text[idx] for idx in rand])
+                text_length = torch.tensor([self.text_length[idx] for idx in rand], dtype=torch.long)
+                code = self.seg2code[rand]
+            
             else:
-                raise False
-                # rand = np.random.choice(150, size=1024, replace=True)
-                # code = self.seg2code[rand]
+                raise NotImplementedError
 
-            if self.prompt_type == 'gt_seg':
+            if self.fakeimage_prompt_type == 'all':
+                src_text = torch.cat([self.id2text[idx] for idx in range(150)])
+                src_item = torch.cat([self.bos_item, src_text, self.eos_item])
+
+            elif self.fakeimage_prompt_type == 'gt_seg':
                 unique_seg_ids = gt_semantic_seg_downsampled.unique()
                 randperm = torch.randperm(len(unique_seg_ids))
                 unique_seg_ids = unique_seg_ids[randperm]
-                
+                    
                 src_text = torch.cat([self.id2text[idx] for idx in unique_seg_ids])
                 src_item = torch.cat([self.bos_item, src_text, self.eos_item])
+            
+            else:
+                raise NotImplementedError
             
             example["text2seg_patch_image"] = text_list
             example["text2seg_patch_mask"] = text_length.cumsum(dim=0)

@@ -16,4 +16,5 @@ from .patch_ofa_custom_criterion_v4_3 import CustomCriterionV4_3
 from .seg_criterion_v1 import SegCriterionV1
 from .seg_criterion_v2 import SegCriterionV2
 from .seg_criterion_v3 import SegCriterionV3
+from .seg_criterion_v4 import SegCriterionV4
 from .seg_criterion_mlp import SegCriterionMLP
