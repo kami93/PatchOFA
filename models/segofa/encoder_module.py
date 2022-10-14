@@ -186,6 +186,9 @@ class TransformerEncoder(FairseqEncoder):
             logger.info("Freezing all ResNet parameters...")
             for param in self.embed_images.parameters():
                 param.requires_grad_(False)
+            
+            for param in self.image_proj.parameters():
+                param.requires_grad_(False)
 
         if getattr(args, "patch_layernorm_embedding", False):
             self.patch_layernorm_embedding = LayerNorm(embed_dim)
