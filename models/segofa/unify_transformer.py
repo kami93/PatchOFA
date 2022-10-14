@@ -306,10 +306,14 @@ class TransformerModel(FairseqEncoderDecoderModel):
         
         parser.add_argument('--num-seg-tokens', type=int, default=150,
                             help='Number of segmentation tokens')
-        parser.add_argument('--decoder-type', type=str, default='ofa',
-                            help='mlp | ofa')
+        parser.add_argument('--decoder-type', type=str, default='surrogate',
+                            help='mlp | surrogate')
         parser.add_argument('--tie-seg-projection', type=str, default='true',
                             help='Whether to tie the seg projection weights with seg tokens')
+        
+        parser.add_argument('--decoder-input-type', type=str, default='encoder_input',
+                            help='encoder_input | encoder_output')
+        
         # fmt: on
 
     @classmethod

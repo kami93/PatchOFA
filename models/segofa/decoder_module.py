@@ -121,6 +121,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.register_buffer("version", torch.Tensor([3]))
         self._future_mask = torch.empty(0)
 
+        self.decoder_input_type = args.decoder_input_type
         self.no_grad_image = resolve_str_true_false(args.no_grad_image)
         self.l2_normalized_seg = resolve_str_true_false(args.l2_normalized_seg)
         tie_seg_projection = resolve_str_true_false(args.tie_seg_projection)
@@ -576,7 +577,13 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             
             # embed tokens and positions
             bos = prev_output_tokens[:, :1]
-            image_embed_before_scale = encoder_out["image_embed_before_scale"][0]
+            
+            
+            if self.decoder_input_type == 'encoder_input':
+                image_embed_before_scale = encoder_out["image_embed_before_scale"][0]
+            elif self.decoder_input_type == 'encoder_output':
+                image_embed_before_scale = encoder_out["encoder_out"][0][:1024]
+            
             if self.no_grad_image:
                 image_embed_before_scale = image_embed_before_scale.detach() # STOP_GRAD
             
