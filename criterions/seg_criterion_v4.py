@@ -587,6 +587,7 @@ class SegCriterionV4(FairseqCriterion):
 
         assert self.ignore_eos
         
+        unlabeled_loss = torch.tensor([0.0], device=classifier_logits.device)
         if aug_output is not None:
             if self.upscale_lprobs:
                 logits_train = logits
