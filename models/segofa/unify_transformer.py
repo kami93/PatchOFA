@@ -268,6 +268,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--freeze-entire-resnet', type=str, default='false', help='freeze resnet (all params)')
         parser.add_argument('--freeze-encoder-embedding', type=str, default='false', help='freeze encoder token embedding')
         parser.add_argument('--freeze-decoder-embedding', type=str, default='false',  help='freeze decoder token embedding')
+        parser.add_argument('--freeze-seg-embedding', type=str, default='false',  help='freeze seg token embedding')
         parser.add_argument('--add-type-embedding', action='store_true',
                             help='add source/region/patch type embedding')
         parser.add_argument('--interpolate-position', action='store_true',
@@ -308,7 +309,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='Number of segmentation tokens')
         parser.add_argument('--decoder-type', type=str, default='surrogate',
                             help='mlp | surrogate')
-        parser.add_argument('--tie-seg-projection', type=str, default='true',
+        parser.add_argument('--tie-seg-projection', type=str, default='false',
                             help='Whether to tie the seg projection weights with seg tokens')
         
         parser.add_argument('--decoder-input-type', type=str, default='encoder_input',
@@ -365,6 +366,7 @@ class TransformerModel(FairseqEncoderDecoderModel):
         
         freeze_encoder_embedding = resolve_str_true_false(args.freeze_encoder_embedding)
         freeze_decoder_embedding = resolve_str_true_false(args.freeze_decoder_embedding)
+        freeze_seg_embedding = resolve_str_true_false(args.freeze_seg_embedding)
         
         if freeze_encoder_embedding or getattr(
                 args, "encoder_prompt", False) or getattr(args, "decoder_prompt", False) or getattr(args, "adapter", False):    
@@ -372,6 +374,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
         if freeze_decoder_embedding or getattr(
                 args, "encoder_prompt", False) or getattr(args, "decoder_prompt", False) or getattr(args, "adapter", False):    
             decoder_embed_tokens.weight.requires_grad = False
+        if freeze_seg_embedding:
+            seg_embed_tokens.weight.requires_grad = False
         if getattr(args, "offload_activations", False):
             args.checkpoint_activations = True  # offloading implies checkpointing
         encoder = cls.build_encoder(args, src_dict, encoder_embed_tokens, seg_embed_tokens)
