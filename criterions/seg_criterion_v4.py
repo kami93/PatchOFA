@@ -701,7 +701,10 @@ class SegCriterionV4(FairseqCriterion):
         with torch.no_grad():
             metrics["threshold_mask_ratio"] = threshold_mask.sum() / threshold_mask.numel()
             if self.unlabeled_head_type == 'shared':
-                metrics["threshold_acc"] = (logits_train.argmax(-1) == target_train)[threshold_mask].float().mean()
+                if threshold_mask.sum().item():
+                    metrics["threshold_acc"] = (logits_train.argmax(-1) == target_train)[threshold_mask].float().mean()
+                else:
+                    metrics["threshold_acc"] = torch.tensor([0.0], device=logits_train.device)
 
             metrics["nll_loss"] = F.cross_entropy(classifier_logits_lowres.detach(), target_lowres.detach()) # just for display
             area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_logits_lowres.detach(), target_lowres.detach())
