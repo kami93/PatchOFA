@@ -7,6 +7,8 @@ import math
 from dataclasses import dataclass, field
 from re import S
 from typing import Optional
+from collections import OrderedDict
+
 import torch.distributed as dist
 
 import torch
@@ -26,6 +28,32 @@ from omegaconf import II
 
 import logging
 logger = logging.getLogger(__name__)
+
+CLASSES = np.array([
+    'wall', 'building', 'sky', 'floor', 'tree', 'ceiling', 'road', 'bed ',
+    'windowpane', 'grass', 'cabinet', 'sidewalk', 'person', 'earth',
+    'door', 'table', 'mountain', 'plant', 'curtain', 'chair', 'car',
+    'water', 'painting', 'sofa', 'shelf', 'house', 'sea', 'mirror', 'rug',
+    'field', 'armchair', 'seat', 'fence', 'desk', 'rock', 'wardrobe',
+    'lamp', 'bathtub', 'railing', 'cushion', 'base', 'box', 'column',
+    'signboard', 'chest of drawers', 'counter', 'sand', 'sink',
+    'skyscraper', 'fireplace', 'refrigerator', 'grandstand', 'path',
+    'stairs', 'runway', 'case', 'pool table', 'pillow', 'screen door',
+    'stairway', 'river', 'bridge', 'bookcase', 'blind', 'coffee table',
+    'toilet', 'flower', 'book', 'hill', 'bench', 'countertop', 'stove',
+    'palm', 'kitchen island', 'computer', 'swivel chair', 'boat', 'bar',
+    'arcade machine', 'hovel', 'bus', 'towel', 'light', 'truck', 'tower',
+    'chandelier', 'awning', 'streetlight', 'booth', 'television receiver',
+    'airplane', 'dirt track', 'apparel', 'pole', 'land', 'bannister',
+    'escalator', 'ottoman', 'bottle', 'buffet', 'poster', 'stage', 'van',
+    'ship', 'fountain', 'conveyer belt', 'canopy', 'washer', 'plaything',
+    'swimming pool', 'stool', 'barrel', 'basket', 'waterfall', 'tent',
+    'bag', 'minibike', 'cradle', 'oven', 'ball', 'food', 'step', 'tank',
+    'trade name', 'microwave', 'pot', 'animal', 'bicycle', 'lake',
+    'dishwasher', 'screen', 'blanket', 'sculpture', 'hood', 'sconce',
+    'vase', 'traffic light', 'tray', 'ashcan', 'fan', 'pier', 'crt screen',
+    'plate', 'monitor', 'bulletin board', 'shower', 'radiator', 'glass',
+    'clock', 'flag'])
 
 @dataclass
 class SegCriterionV3Config(FairseqDataclass):
@@ -109,6 +137,9 @@ class SegCriterionV3Config(FairseqDataclass):
     )
     unlabeled_head_type: str = field(
         default='shared', metadata={"help": "shared | mlp"}
+    )
+    init_seg_with_text: str = field(
+        default='true', metadata={"help": "whether to lazy initialize the seg token with text embedding bags."}
     )
     
 def resolve_str_true_false(x):
@@ -218,7 +249,8 @@ class SegCriterionV3(FairseqCriterion):
         freeze_embedding_iter=-1,
         full_context_alignment='false',
         unlabeled_target='self',
-        unlabeled_head_type='shared'
+        unlabeled_head_type='shared',
+        init_seg_with_text='true',
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -248,6 +280,7 @@ class SegCriterionV3(FairseqCriterion):
         self.upscale_lprobs = resolve_str_true_false(upscale_lprobs)
         self.unsupervised_segmentation = resolve_str_true_false(unsupervised_segmentation)
         self.full_context_alignment = resolve_str_true_false(full_context_alignment)
+        self.init_seg_with_text = resolve_str_true_false(init_seg_with_text)
         
         self.unlabeled_target = unlabeled_target
         self.unlabeled_head_type = unlabeled_head_type
@@ -283,6 +316,30 @@ class SegCriterionV3(FairseqCriterion):
         2) the sample size, which is used as the denominator for the gradient
         3) logging outputs to display while training
         """
+        if self.init_seg_with_text and self.iter == -1:
+            # Do lazy initializations;
+            def encode_text(text):
+                line = [self.task.bpe.encode(' {}'.format(word.strip())) for word in text.strip().split()]
+                line = ' '.join(line)
+                
+                s = self.task.tgt_dict.encode_line(
+                    line=line,
+                    add_if_not_exist=False,
+                    append_eos=False
+                ).long()
+                return s
+            
+            with torch.no_grad():
+                id2text = [encode_text(f" {x}") for x in CLASSES]
+                id2text_tokens = torch.cat(id2text).cuda()
+                
+                text_length = torch.tensor([len(x) for x in id2text])
+                start_offset = torch.cat([text_length.new_zeros(size=(1, ), dtype=torch.long), text_length.cumsum(dim=0)[:-1]], dim=0).cuda()
+                
+                avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
+                model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
+            logger.info("Initialized seg tokens with embedding bag.")
+
         # 20221006 수정사항
         # count effective iterations given iter and criterion_update_freq
         if model.training:
@@ -334,7 +391,7 @@ class SegCriterionV3(FairseqCriterion):
         else:
             compute_seg_loss = self.compute_loss
                 
-        seg_loss, nll_loss, threshold_mask, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce)
+        seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce)
         
         loss = (1.0 - alpha_coefficient) * labeled_loss + alpha_coefficient * seg_loss
         sample_size = (
@@ -345,21 +402,15 @@ class SegCriterionV3(FairseqCriterion):
             "loss": loss.data,
             "labeled_loss": labeled_loss.data,
             "seg_loss": seg_loss.data,
-            "nll_loss": nll_loss.data,
             "alpha_coefficient": alpha_coefficient, # 20221006 수정사항: alpha coefficient 로깅
-            "threshold_mask_ratio": threshold_mask.sum() / threshold_mask.numel(),
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
-            "area_intersect_lowres": area_intersect_lowres.data,
-            "area_pred_label_lowres": area_pred_label_lowres.data,
-            "area_label_lowres": area_label_lowres.data,
-            "area_union_lowres": area_union_lowres.data,
-            "area_intersect": area_intersect.data,
-            "area_pred_label": area_pred_label.data,
-            "area_label": area_label.data,
-            "area_union": area_union.data
         }
+        for key, value in metrics.items():
+            if isinstance(value, torch.Tensor):
+                value = value.data
+            logging_output[key] = value
 
         if self.use_centering:
             abs_center = self.center.abs()
@@ -563,9 +614,7 @@ class SegCriterionV3(FairseqCriterion):
     def compute_unlabled_kld_loss(self, model, net_output, sample, update_num, reduce=True):
         classifier_logits, extra = net_output
         if self.unlabeled_head_type == 'shared':
-            [logits, logits_lowres], [target, target_lowres], constraint_masks = self.reshape_logits_and_target(model, classifier_logits, sample)
-            classifier_logits = logits
-            classifier_logits_lowres = logits_lowres
+            [logits, logits_lowres], [target, target_lowres], constraint_masks, [classifier_logits, classifier_logits_lowres] = self.reshape_logits_and_target(model, classifier_logits, sample, alt_logits=classifier_logits)
                         
         elif self.unlabeled_head_type == 'separate':
             features = extra.get('penultimate')
@@ -582,7 +631,7 @@ class SegCriterionV3(FairseqCriterion):
         else:
             logits_train = logits_lowres
             target_train = target_lowres
-                    
+
         student_logits = logits_train / self.student_temperature
         with torch.no_grad():
             if self.use_centering:
@@ -628,12 +677,27 @@ class SegCriterionV3(FairseqCriterion):
         unlabeled_loss = (F.cross_entropy(student_logits, teacher.detach(), label_smoothing=self.eps, reduction='none') * threshold_mask).mean()
         ntokens = 1
 
+        metrics = dict()
         with torch.no_grad():
-            nll_loss = F.cross_entropy(classifier_logits_lowres.detach(), target_lowres.detach()) # just for display
+            metrics["threshold_mask_ratio"] = threshold_mask.sum() / threshold_mask.numel()
+            if self.unlabeled_head_type == 'shared':
+                metrics["threshold_acc"] = (logits_train.argmax(-1) == target_train)[threshold_mask].float().mean()
+
+            metrics["nll_loss"] = F.cross_entropy(classifier_logits_lowres.detach(), target_lowres.detach()) # just for display
+
             area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_logits_lowres.detach(), target_lowres.detach())
+            metrics["area_intersect_lowres"] = area_intersect_lowres
+            metrics["area_pred_label_lowres"] = area_pred_label_lowres
+            metrics["area_label_lowres"] = area_label_lowres
+            metrics["area_union_lowres"] = area_union_lowres
+
             area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_logits.detach(), target.detach())
+            metrics["area_intersect"] = area_intersect
+            metrics["area_pred_label"] = area_pred_label
+            metrics["area_label"] = area_label
+            metrics["area_union"] = area_union
         
-        return unlabeled_loss, nll_loss, threshold_mask, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
+        return unlabeled_loss, metrics, ntokens
 
     def compute_loss(self, model, net_output, sample, update_num, reduce=True):
         # lprobs, target, lprobs_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample)
@@ -748,6 +812,8 @@ class SegCriterionV3(FairseqCriterion):
         alpha_coefficient = logging_outputs[0].get("alpha_coefficient", 0.0)
         
         threshold_mask_ratio_sum = sum(log.get("threshold_mask_ratio", 0.0) for log in logging_outputs)
+        threshold_acc_sum = sum(log.get("threshold_acc", 0.0) for log in logging_outputs)
+
         abs_center_max = logging_outputs[0].get("abs_center_max", 0.0)
         abs_center_mean = logging_outputs[0].get("abs_center_mean", 0.0)
         
@@ -793,6 +859,10 @@ class SegCriterionV3(FairseqCriterion):
         metrics.log_scalar(
             "threshold_mask_ratio", threshold_mask_ratio_sum / sample_size, 1, round=3
         )
+        metrics.log_scalar(
+            "threshold_acc", threshold_acc_sum / sample_size, 1, round=3
+        )
+
         metrics.log_scalar(
             "abs_center_max", abs_center_max / sample_size, 1, round=3
         )
