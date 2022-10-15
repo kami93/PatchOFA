@@ -582,8 +582,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if self.decoder_input_type == 'encoder_input':
                 image_embed_before_scale = encoder_out["image_embed_before_scale"][0]
             elif self.decoder_input_type == 'encoder_output':
-                image_embed_before_scale = encoder_out["encoder_out"][0][:1024]
-            
+                image_embed_before_scale = rearrange(encoder_out["encoder_out"][0][:1024], 'l b d -> b l d')
+
             if self.no_grad_image:
                 image_embed_before_scale = image_embed_before_scale.detach() # STOP_GRAD
             
