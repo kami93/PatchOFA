@@ -139,7 +139,7 @@ class SegCriterionV3Config(FairseqDataclass):
         default='shared', metadata={"help": "shared | mlp"}
     )
     init_seg_with_text: str = field(
-        default='true', metadata={"help": "whether to lazy initialize the seg token with text embedding bags."}
+        default='true', metadata={"help": "whether to lazy initialize the segmentation with text embedding bags."}
     )
     
 def resolve_str_true_false(x):
@@ -338,6 +338,8 @@ class SegCriterionV3(FairseqCriterion):
                 
                 avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
                 model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
+                model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
+                model.decoder.seg_projection.weight.data = avg_embedding.data
             logger.info("Initialized seg tokens with embedding bag.")
 
         # 20221006 수정사항
