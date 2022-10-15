@@ -132,7 +132,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         num_seg_tokens = 150
         self.seg_projection = Linear(embed_dim, num_seg_tokens, bias=False)
         if tie_seg_projection:
-            logger.info("Tieing seg projection weight with seg tokens.")
+            logger.info("Tying seg projection weight with seg tokens.")
             self.seg_projection.weight = self.seg_embed_tokens.weight
         
         self.decoder_type = args.decoder_type
