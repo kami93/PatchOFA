@@ -336,6 +336,8 @@ class SegCriterionV4(FairseqCriterion):
                 
                 avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
                 model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
+                model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
+                model.decoder.seg_projection.weight.data = avg_embedding.data
             logger.info("Initialized seg tokens with embedding bag.")
 
         # 20221006 수정사항
