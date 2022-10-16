@@ -360,12 +360,18 @@ class SegmentationDataset(OFADataset):
         # build 
         src_item_2 = None
         if self.prompt_type == 'gt_seg':
-            unique_seg_ids = gt_semantic_seg_downsampled.unique()
-            randperm = torch.randperm(len(unique_seg_ids))
-            unique_seg_ids = unique_seg_ids[randperm]
+            if self.split == 'train':
+                unique_seg_ids = gt_semantic_seg_downsampled.unique()
+                randperm = torch.randperm(len(unique_seg_ids))
+                unique_seg_ids = unique_seg_ids[randperm]
             
-            src_text = torch.cat([self.id2text[idx] for idx in unique_seg_ids])
-            src_item = torch.cat([self.bos_item, src_text, self.eos_item])
+                src_text = torch.cat([self.id2text[idx] for idx in unique_seg_ids])
+                src_item = torch.cat([self.bos_item, src_text, self.eos_item])
+                
+            else:
+                # self.prompt_type is 'all' during validation.
+                src_text = torch.cat([self.id2text[idx] for idx in range(150)])
+                src_item = torch.cat([self.bos_item, src_text, self.eos_item])
         
         elif self.prompt_type == 'prompt':
             src_item = torch.cat([self.bos_item, self.prompt, self.eos_item])
