@@ -5,7 +5,7 @@
 
 import math
 from dataclasses import dataclass, field
-from re import S
+from re import S, X
 from typing import Optional
 from collections import OrderedDict
 
@@ -339,7 +339,8 @@ class SegCriterionV3(FairseqCriterion):
                 avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
                 model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
                 model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
-                model.decoder.seg_projection.weight.data = avg_embedding.data
+                if not model.decoder.tie_seg_projection:
+                    model.decoder.seg_projection.weight.data = avg_embedding.data
             logger.info("Initialized seg tokens with embedding bag.")
 
         # 20221006 수정사항
@@ -387,7 +388,7 @@ class SegCriterionV3(FairseqCriterion):
         else:
             net_output = model(**sample["net_input"])
             labeled_loss = net_output[0].new_zeros(size=(1, ))
-        
+
         if self.unsupervised_segmentation:
             compute_seg_loss = self.compute_unlabled_kld_loss
         else:
@@ -438,27 +439,20 @@ class SegCriterionV3(FairseqCriterion):
     def reshape_logits_and_target(self, model, logits, sample, alt_logits=None):
         conf = sample['conf'][:, None, None] if 'conf' in sample and sample['conf'] is not None else 1
         constraint_masks = None
-        if "constraint_masks" in sample and sample["constraint_masks"] is not None:
-            constraint_masks = sample["constraint_masks"]
-            logits.masked_fill_(~constraint_masks, -math.inf)
-            if alt_logits is not None:
-                alt_logits.masked_fill_(~constraint_masks, -math.inf)
+        # if "constraint_masks" in sample and sample["constraint_masks"] is not None:
+        #     constraint_masks = sample["constraint_masks"]
+        #     logits.masked_fill_(~constraint_masks, -math.inf)
+        #     if alt_logits is not None:
+        #         alt_logits.masked_fill_(~constraint_masks, -math.inf)
             
-        if self.constraint_start is not None and self.constraint_end is not None:
-            logits[:, :, 4:self.constraint_start] = -math.inf
-            logits[:, :, self.constraint_end:] = -math.inf
-            if alt_logits is not None:
-                logits[:, :, 4:self.constraint_start] = -math.inf
-                logits[:, :, self.constraint_end:] = -math.inf
+        # if self.constraint_start is not None and self.constraint_end is not None:
+        #     logits[:, :, 4:self.constraint_start] = -math.inf
+        #     logits[:, :, self.constraint_end:] = -math.inf
+        #     if alt_logits is not None:
+        #         logits[:, :, 4:self.constraint_start] = -math.inf
+        #         logits[:, :, self.constraint_end:] = -math.inf
         # lprobs = model.get_normalized_probs(net_output, log_probs=True) * conf
-        
-        logits_lowres = logits.float()
-        if self.upscale_lprobs:
-            logits = self.upsample_logits(logits_lowres)
-            
-        target_lowres = sample["downsampled_target"]
-        target = sample["target"]
-        
+
         # if self.ignore_prefix_size > 0:
         #     lprobs = lprobs[:, self.ignore_prefix_size :, :].contiguous()
         #     target = target[:, self.ignore_prefix_size :].contiguous()
@@ -466,6 +460,13 @@ class SegCriterionV3(FairseqCriterion):
         #     if constraint_masks is not None:
         #         constraint_masks = constraint_masks[:, self.ignore_prefix_size :, :].contiguous()
 
+        logits_lowres = logits.float()
+        if self.upscale_lprobs:
+            logits = self.upsample_logits(logits_lowres)
+            
+        target_lowres = sample["downsampled_target"]
+        target = sample["target"]
+        
         if self.ignore_eos:
             bsz, seq_len = target_lowres.size()
             eos_indices_lowres = target_lowres.eq(self.task.tgt_dict.eos())
@@ -478,12 +479,21 @@ class SegCriterionV3(FairseqCriterion):
             if self.upscale_lprobs:
                 logits = logits[~eos_indices].reshape(bsz, seq_len-1, logits.size(-1))
 
+        # bsz, seq_len = target_lowres.size()
+        # class_mask = torch.zeros([bsz, 151], dtype=torch.bool, device=logits_lowres.device)
+        # class_target = target_lowres - self.seg_id_offset
+        # class_mask[torch.arange(bsz).unsqueeze(-1).expand(-1, seq_len), class_target] = True
+        # class_mask = class_mask[:, :150]
+        # class_mask = class_mask.unsqueeze(1).expand(-1, seq_len, -1)
+
         if self.upscale_lprobs:
             logits = logits.reshape(-1, logits.size(-1))
         logits_lowres = logits_lowres.reshape(-1, logits_lowres.size(-1))
         
         target = target.reshape(-1)
         target_lowres = target_lowres.reshape(-1)
+
+        # class_mask = class_mask.reshape(-1, 150)
      
         mask = torch.logical_and(target != self.padding_idx, target != (self.seg_id_offset+150))
         if self.upscale_lprobs:
@@ -496,6 +506,9 @@ class SegCriterionV3(FairseqCriterion):
         target_lowres = target_lowres[mask_lowres]
         target_lowres = target_lowres - self.seg_id_offset
         
+        # class_mask = class_mask[mask_lowres]
+        # constraint_masks = ~class_mask
+
         if self.upscale_lprobs:
             logits = [logits, logits_lowres]
         else:
@@ -614,36 +627,67 @@ class SegCriterionV3(FairseqCriterion):
         return loss
 
     def compute_unlabled_kld_loss(self, model, net_output, sample, update_num, reduce=True):
-        classifier_logits, extra = net_output
+        classifier_logits_lowres, extra = net_output
+
+        target_lowres = sample.get("downsampled_target")
+        sample_masks_lowres = None # ignoring idx mask for "sample" dimension
+        constraint_masks_lowres = None # ignoring idx mask for "channel" dimension
+
+        classifier_logits_lowres = classifier_logits_lowres.float()
+        
+        target_lowres_shape = target_lowres.shape
+        assert target_lowres_shape == classifier_logits_lowres.shape[:-1]
+
+        sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+150))
+        if self.ignore_eos:
+            eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
+            sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
+
+        # calculate upscaled versions
+        target = sample.get("target")
+        sample_masks = None
+        constraint_masks = None
+
+        classifier_logits = self.upsample_logits(classifier_logits_lowres) # bilinear upsample
+
+        target_shape = target.shape
+        assert target_shape == classifier_logits.shape[:-1]
+
+        sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+150))
+        if self.ignore_eos:
+            eos_masks = target.eq(self.task.tgt_dict.eos())
+            sample_masks = torch.logical_or(sample_masks, eos_masks)
+
+        # apply masking to targets
+        target_lowres = target_lowres[~sample_masks_lowres] - self.seg_id_offset
+        target = target[~sample_masks] - self.seg_id_offset
+
+        # classifier_logits_lowres = classifier_logits_lowres[~sample_masks_lowres]
+        # classifier_logits = classifier_logits[~sample_masks]
+
         if self.unlabeled_head_type == 'shared':
-            [logits, logits_lowres], [target, target_lowres], constraint_masks, [classifier_logits, classifier_logits_lowres] = self.reshape_logits_and_target(model, classifier_logits, sample, alt_logits=classifier_logits)
-                        
+            logits_train = classifier_logits_lowres
+            target_train = target_lowres
+            constraint_masks_train = constraint_masks_lowres
+            sample_masks_train = sample_masks_lowres
+            if self.upscale_lprobs:
+                logits_train = classifier_logits
+                target_train = target
+                constraint_masks_train = constraint_masks
+                sample_masks_train = sample_masks
+        
         elif self.unlabeled_head_type == 'separate':
             features = extra.get('penultimate')
-            separate_logits = self.unlabeled_head(features)
-            
-            [logits, logits_lowres], [target, target_lowres], constraint_masks, [classifier_logits, classifier_logits_lowres] = self.reshape_logits_and_target(model, separate_logits, sample, alt_logits=classifier_logits)
+            logits_train = self.unlabeled_head(features)
+            assert target_lowres_shape == logits_train.shape[:-1]
 
-        assert self.ignore_eos
-        
-        if self.upscale_lprobs:
-            logits_train = logits
-            target_train = target
-            
-        else:
-            logits_train = logits_lowres
             target_train = target_lowres
+            constraint_masks_train = constraint_masks_lowres
+            sample_masks_train = sample_masks_lowres
 
-        student_logits = logits_train / self.student_temperature
         with torch.no_grad():
-            if self.use_centering:
-                if model.training:
-                    self.update_center(logits_train)
-                logits_teacher = (logits_train - self.center)
-            else:
-                logits_teacher = logits_train
-            
             if self.unlabeled_target == 'gt':
+                raise NotImplementedError
                 len_target = len(target_train)
                 mask = target_train.unsqueeze(0) == target_train.unsqueeze(1)
                 # mask.diagonal()[:] = False
@@ -661,30 +705,69 @@ class SegCriterionV3(FairseqCriterion):
                 logits_teacher = logits_teacher[target_teacher]
             
             elif self.unlabeled_target == 'self':
-                pass
+                logits_teacher = logits_train
+                logits_teacher = logits_teacher[~sample_masks_train]
+
+            elif self.unlabeled_target == 'resnet_cosine':
+                resnet_features = extra.get('encoder_returns').get('image_embed_before_proj')[0]
+                resnet_features_n = F.normalize(resnet_features, dim=-1)
+
+                sim = resnet_features_n @ resnet_features_n.transpose(-2,-1)
+                sim.diagonal(dim1=1, dim2=2)[:] = float("-inf")
+
+                closest = sim.argmax(-1)
+                bsz, seqlen = closest.size()
+                batch_idx = torch.arange(bsz).unsqueeze(-1).expand(-1, seqlen)
+                logits_teacher = logits_train[batch_idx, closest]
+
+                logits_teacher = logits_teacher[~sample_masks_train[:, :-1]]
+                logits_teacher = torch.cat([logits_teacher, logits_train[~sample_masks_train]], dim=0)
             
             elif self.unlabeled_target == 'cosine':
                 raise NotImplementedError
+
+            if self.use_centering:
+                if model.training:
+                    self.update_center(logits_teacher)
+                logits_teacher = (logits_teacher - self.center)
+                if self.teacher_temperature == 0.0:
+                    logits_teacher = logits_teacher / 0.07
+            
+            if constraint_masks_train is not None:
+                logits_teacher[constraint_masks_train] = float('-inf')
             
             pred = F.softmax(logits_teacher, dim=-1)
             max_value, max_index = pred.max(1)
             threshold_mask = (max_value >= self.unlabeled_threshold)
             if self.teacher_temperature == 0.0:
                 teacher = max_index
-                
             else:
                 logits_teacher = logits_teacher / self.teacher_temperature
                 teacher = F.softmax(logits_teacher, dim=-1)
 
-        unlabeled_loss = (F.cross_entropy(student_logits, teacher.detach(), label_smoothing=self.eps, reduction='none') * threshold_mask).mean()
+        logits_student = logits_train / self.student_temperature
+        if self.unlabeled_target == 'resnet_cosine':
+            logits_student = torch.cat([logits_student[~sample_masks_train], logits_student[batch_idx, closest][~sample_masks_train[:, :-1]]], dim=0)
+        else:
+            logits_student = logits_student[~sample_masks_train]
+
+        unlabeled_loss = (F.cross_entropy(logits_student, teacher.detach(), label_smoothing=self.eps, reduction='none') * threshold_mask).mean()
         ntokens = 1
 
         metrics = dict()
         with torch.no_grad():
+            classifier_logits_lowres = classifier_logits_lowres[~sample_masks_lowres]
+            classifier_logits = classifier_logits[~sample_masks]
+            
             metrics["threshold_mask_ratio"] = threshold_mask.sum() / threshold_mask.numel()
             if self.unlabeled_head_type == 'shared':
+                if constraint_masks_train is not None and model.training:
+                    classifier_logits_lowres[constraint_masks_train] = float('-inf')
+                
+                num_samples = classifier_logits_lowres.size(0)
+                threshold_mask = threshold_mask[-num_samples:]
                 if threshold_mask.sum().item():
-                    metrics["threshold_acc"] = (logits_train.argmax(-1) == target_train)[threshold_mask].float().mean()
+                    metrics["threshold_acc"] = (classifier_logits_lowres.argmax(-1) == target_train)[threshold_mask].float().mean()
                 else:
                     metrics["threshold_acc"] = torch.tensor([0.0], device=logits_train.device)
 

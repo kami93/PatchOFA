@@ -394,7 +394,11 @@ class SegmentationDataset(OFADataset):
         elif self.prompt_type == 'all':
             src_text = torch.cat([self.id2text[idx] for idx in range(150)])
             src_item = torch.cat([self.bos_item, src_text, self.eos_item])
-            
+
+        elif self.prompt_type == 'seg':
+            src_text = self.seg2code[:150]
+            src_item = torch.cat([self.bos_item, src_text, self.eos_item])
+
         else:
             raise NotImplementedError
 

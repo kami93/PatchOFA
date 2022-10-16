@@ -356,30 +356,29 @@ class TransformerEncoder(FairseqEncoder):
     ):
         # embed tokens and positions
         if token_embedding is None:
-            # bsz, length = src_tokens.size()
-            # src_tokens_flat = src_tokens.flatten()
+            bsz, length = src_tokens.size()
+            src_tokens_flat = src_tokens.flatten()
             
-            # offset = self.dictionary.index('<seg_0>')
-            # mask = src_tokens_flat < offset
+            offset = self.dictionary.index('<seg_0>')
+            mask = src_tokens_flat < offset
             
-            # lang_tokens = src_tokens_flat[mask]
-            # lang_embedding = self.embed_tokens(lang_tokens)
+            lang_tokens = src_tokens_flat[mask]
+            lang_embedding = self.embed_tokens(lang_tokens)
             
-            # seg_tokens = src_tokens_flat[~mask] - offset
-            # seg_embedding = self.seg_embed_tokens(seg_tokens)
+            seg_tokens = src_tokens_flat[~mask] - offset
+            seg_embedding = self.seg_embed_tokens(seg_tokens)
             
-            # token_embedding = torch.cat([lang_embedding, seg_embedding], dim=0)
+            token_embedding = torch.cat([lang_embedding, seg_embedding], dim=0)
             
-            # all_idx = torch.arange(bsz*length)
-            # lang_idx = all_idx[mask]
-            # seg_idx = all_idx[~mask]
-            # restore_idx = torch.cat([lang_idx, seg_idx], dim=0).argsort()
+            all_idx = torch.arange(bsz*length)
+            lang_idx = all_idx[mask]
+            seg_idx = all_idx[~mask]
+            restore_idx = torch.cat([lang_idx, seg_idx], dim=0).argsort()
             
-            # token_embedding = token_embedding[restore_idx]
-            # token_embedding = token_embedding.reshape(bsz, length, -1)
-        
-            token_embedding = self.embed_tokens(src_tokens)
-            
+            token_embedding = token_embedding[restore_idx]
+            token_embedding = token_embedding.reshape(bsz, length, -1)
+            # token_embedding = self.embed_tokens(src_tokens)
+
         x = embed = self.embed_scale * token_embedding
         if self.entangle_position_embedding and pos_embed is not None:
             x += pos_embed
@@ -829,7 +828,8 @@ class TransformerEncoder(FairseqEncoder):
             "position_embeddings": [pos_embed],  # B x T x C
             "patch_images": [patch_images],
             "image_embed_before_scale": [image_embed_before_scale],
-            "image_embed_shape": [image_embed_shape]
+            "image_embed_shape": [image_embed_shape],
+            "image_embed_before_proj": [image_embed]
         }
 
     @torch.jit.export
@@ -894,7 +894,14 @@ class TransformerEncoder(FairseqEncoder):
             new_image_embed_before_scale = [
                 encoder_out["image_embed_before_scale"][0].index_select(0, new_order)
             ]
-            
+        
+        if len(encoder_out["image_embed_before_proj"]) == 0:
+            new_image_embed_before_proj = []
+        else:
+            new_image_embed_before_proj = [
+                encoder_out["image_embed_before_proj"][0].index_select(0, new_order)
+            ]
+
         return {
             "encoder_out": new_encoder_out,  # T x B x C
             "encoder_padding_mask": new_encoder_padding_mask,  # B x T
@@ -905,6 +912,7 @@ class TransformerEncoder(FairseqEncoder):
             "position_embeddings": new_position_embeddings,  # B x T x C
             "patch_images": new_patch_images,
             "image_embed_before_scale": new_image_embed_before_scale,
+            "image_embed_before_proj": new_image_embed_before_proj,
             "image_embed_shape": encoder_out["image_embed_shape"]
         }
 
