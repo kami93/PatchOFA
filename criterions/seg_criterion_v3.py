@@ -735,10 +735,23 @@ class SegCriterionV3(FairseqCriterion):
             
             if constraint_masks_train is not None:
                 logits_teacher[constraint_masks_train] = float('-inf')
-            
-            pred = F.softmax(logits_teacher, dim=-1)
-            max_value, max_index = pred.max(1)
-            threshold_mask = (max_value >= self.unlabeled_threshold)
+
+            if self.unlabeled_target == 'resnet_cosine':
+                ns = len(logits_teacher)
+                logits_teacher_index = logits_teacher.argmax(-1)
+                mask_cosine = logits_teacher_index[:ns//2] == logits_teacher_index[ns//2:]
+
+                pred = F.softmax(logits_teacher, dim=-1)
+                max_value, max_index = pred.max(1)
+                threshold_mask = (max_value >= self.unlabeled_threshold)
+                mask_thres = torch.logical_or(threshold_mask[:ns//2], threshold_mask[ns//2:])
+                threshold_mask = torch.logical_and(mask_cosine, mask_thres)
+                threshold_mask = torch.cat([threshold_mask, threshold_mask], dim=0)
+            else:
+                pred = F.softmax(logits_teacher, dim=-1)
+                max_value, max_index = pred.max(1)
+                threshold_mask = (max_value >= self.unlabeled_threshold)
+
             if self.teacher_temperature == 0.0:
                 teacher = max_index
             else:
