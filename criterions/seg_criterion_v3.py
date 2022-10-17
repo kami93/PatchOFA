@@ -274,7 +274,7 @@ class SegCriterionV3(FairseqCriterion):
 
         self.teacher_temperature = teacher_temperature
         self.student_temperature = student_temperature
-        self.alpha = alpha
+        self.effective_alpha = self.alpha = alpha
         self.unlabeled_threshold = unlabeled_threshold
         self.criterion_update_freq = criterion_update_freq
         
@@ -305,7 +305,7 @@ class SegCriterionV3(FairseqCriterion):
             self.constraint_end = int(constraint_end)
         
         if self.unlabeled_head_type == 'shared':
-            assert self.student_temperature == 1.0
+            # assert self.student_temperature == 1.0
             output_classes = 150
         elif self.unlabeled_head_type == 'separate':
             output_classes = 8192
@@ -319,7 +319,7 @@ class SegCriterionV3(FairseqCriterion):
             self.center_momentum = 0.9
             self.register_buffer("center_batch_size", torch.zeros(size=(1, )), persistent=False) # tmp buffer for accumulated updates. # self.center_batch_size
 
-    def forward(self, model, sample, update_num=0, reduce=True):
+    def forward(self, model, sample, update_num=0, reduce=True, ema_model=None):
         """Compute the loss for the given sample.
 
         Returns a tuple with three elements:
@@ -350,8 +350,15 @@ class SegCriterionV3(FairseqCriterion):
                 avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
                 model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
                 model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
+                if ema_model is not None:
+                    ema_model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
+                    ema_model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
+                
                 if not model.decoder.tie_seg_projection:
                     model.decoder.seg_projection.weight.data = avg_embedding.data
+                    if ema_model is not None:
+                        ema_model.decoder.seg_projection.weight.data = avg_embedding.data
+                    
             logger.info("Initialized seg tokens with embedding bag.")
 
         # 20221006 수정사항
@@ -364,12 +371,12 @@ class SegCriterionV3(FairseqCriterion):
         # hard ramp-up 적용
         if self.effective_iter < self.hard_rampup_iter:
             if (self.iter == 0) and (self.hard_rampup_iter != 0):
-                logger.info(f"Set alpha_coefficient == 0.0 until hard_rampup iterations {self.hard_rampup_iter}")
-            alpha_coefficient = 0.0
+                logger.info(f"Set effective_alpha == 0.0 until hard_rampup iterations {self.hard_rampup_iter}")
+            self.effective_alpha = 0.0
         else:
             if (self.effective_iter == self.hard_rampup_iter) and (self.iter % self.criterion_update_freq == 0) and (self.hard_rampup_iter != 0):
-                logger.info(f"Hard ramp-up alpha_coefficient == {self.alpha} as effective_iter reached {self.hard_rampup_iter} (raw iter == {self.iter})")
-            alpha_coefficient = self.alpha
+                logger.info(f"Hard ramp-up effective_alpha == {self.alpha} as effective_iter reached {self.hard_rampup_iter} (raw iter == {self.iter})")
+            self.effective_alpha = self.alpha
         
         # 20221006 수정사항
         # embedding freeze iteration 기능 적용
@@ -400,14 +407,17 @@ class SegCriterionV3(FairseqCriterion):
             net_output = model(**sample["net_input"])
             labeled_loss = net_output[0].new_zeros(size=(1, ))
 
+        # torch.save(net_output, "net_output.pt")
+        # torch.save(sample, "sample.pt")
+
         if self.unsupervised_segmentation:
             compute_seg_loss = self.compute_unlabled_kld_loss
         else:
             compute_seg_loss = self.compute_loss
                 
-        seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce)
+        seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
         
-        loss = (1.0 - alpha_coefficient) * labeled_loss + alpha_coefficient * seg_loss
+        loss = (1.0 - self.effective_alpha) * labeled_loss + self.effective_alpha * seg_loss
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
@@ -416,7 +426,7 @@ class SegCriterionV3(FairseqCriterion):
             "loss": loss.data,
             "labeled_loss": labeled_loss.data,
             "seg_loss": seg_loss.data,
-            "alpha_coefficient": alpha_coefficient, # 20221006 수정사항: alpha coefficient 로깅
+            "alpha_coefficient": self.effective_alpha, # 20221006 수정사항: alpha coefficient 로깅
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
@@ -637,7 +647,7 @@ class SegCriterionV3(FairseqCriterion):
         )
         return loss
 
-    def compute_unlabled_kld_loss(self, model, net_output, sample, update_num, reduce=True):
+    def compute_unlabled_kld_loss(self, model, net_output, sample, update_num, reduce=True, ema_model=None):
         classifier_logits_lowres, extra = net_output
 
         target_lowres = sample.get("downsampled_target")
@@ -680,12 +690,12 @@ class SegCriterionV3(FairseqCriterion):
             logits_train = classifier_logits_lowres
             target_train = target_lowres
             constraint_masks_train = constraint_masks_lowres
-            sample_masks_train = sample_masks_lowres
+            # sample_masks_train = sample_masks_lowres
             if self.upscale_lprobs:
                 logits_train = classifier_logits
                 target_train = target
                 constraint_masks_train = constraint_masks
-                sample_masks_train = sample_masks
+                # sample_masks_train = sample_masks
         
         elif self.unlabeled_head_type == 'separate':
             features = extra.get('penultimate')
@@ -694,9 +704,19 @@ class SegCriterionV3(FairseqCriterion):
 
             target_train = target_lowres
             constraint_masks_train = constraint_masks_lowres
-            sample_masks_train = sample_masks_lowres
+            # sample_masks_train = sample_masks_lowres
 
         with torch.no_grad():
+            if ema_model is not None:
+                logits_ema, extra_ema = ema_model(**sample["net_input"], full_context_alignment=self.full_context_alignment)
+                if self.unlabeled_head_type == 'shared':
+                    logits_ema = logits_ema.float()
+                elif self.unlabeled_head_type == 'separate':
+                    features_ema = extra_ema.get('penultimate')
+                    logits_ema = self.unlabeled_head(features_ema)
+            else:
+                logits_ema = logits_train
+
             if self.unlabeled_target == 'gt':
                 raise NotImplementedError
                 len_target = len(target_train)
@@ -716,8 +736,9 @@ class SegCriterionV3(FairseqCriterion):
                 logits_teacher = logits_teacher[target_teacher]
             
             elif self.unlabeled_target == 'self':
-                logits_teacher = logits_train
-                logits_teacher = logits_teacher[~sample_masks_train]
+                logits_teacher = logits_ema
+                logits_teacher = logits_teacher[:, :-1].reshape(-1, logits_teacher.size(-1))
+
 
             elif self.unlabeled_target == 'resnet_cosine':
                 resnet_features = extra.get('encoder_returns').get('image_embed_before_proj')[0]
@@ -729,16 +750,16 @@ class SegCriterionV3(FairseqCriterion):
                 closest = sim.argmax(-1)
                 bsz, seqlen = closest.size()
                 batch_idx = torch.arange(bsz).unsqueeze(-1).expand(-1, seqlen)
-                logits_teacher = logits_train[batch_idx, closest]
+                logits_teacher = logits_ema[batch_idx, closest]
 
-                logits_teacher = logits_teacher[~sample_masks_train[:, :-1]]
-                logits_teacher = torch.cat([logits_teacher, logits_train[~sample_masks_train]], dim=0)
+                logits_teacher = logits_teacher.reshape(-1, logits_teacher.size(-1))
+                logits_teacher = torch.cat([logits_teacher, logits_ema[:, :-1].reshape(-1, logits_ema.size(-1))], dim=0)
             
             elif self.unlabeled_target == 'cosine':
                 raise NotImplementedError
 
             if self.use_centering:
-                if model.training:
+                if model.training and self.effective_alpha != 0.0:
                     self.update_center(logits_teacher)
                 logits_teacher = (logits_teacher - self.center)
                 if self.teacher_temperature == 0.0:
@@ -793,9 +814,9 @@ class SegCriterionV3(FairseqCriterion):
 
         logits_student = logits_train / self.student_temperature
         if self.unlabeled_target == 'resnet_cosine':
-            logits_student = torch.cat([logits_student[~sample_masks_train], logits_student[batch_idx, closest][~sample_masks_train[:, :-1]]], dim=0)
+            logits_student = torch.cat([logits_student[:, :-1].reshape(-1, logits_student.size(-1)), logits_student[batch_idx, closest].reshape(-1, logits_student.size(-1))], dim=0)
         else:
-            logits_student = logits_student[~sample_masks_train]
+            logits_student = logits_student[:, :-1].reshape(-1, logits_student.size(-1))
 
         unlabeled_loss = (F.cross_entropy(logits_student, teacher.detach(), label_smoothing=self.eps, reduction='none') * threshold_mask).mean()
         ntokens = 1
