@@ -141,6 +141,12 @@ class SegCriterionV3Config(FairseqDataclass):
     init_seg_with_text: str = field(
         default='true', metadata={"help": "whether to lazy initialize the segmentation with text embedding bags."}
     )
+    mask_cosine_criterion: str = field(
+        default='all', metadata={"help": "same | different | all"}
+    )
+    mask_threshold_criterion: str = field(
+        default='all', metadata={"help": "or | and | all"}
+    )
     
 def resolve_str_true_false(x):
     x = x.lower()
@@ -251,6 +257,8 @@ class SegCriterionV3(FairseqCriterion):
         unlabeled_target='self',
         unlabeled_head_type='shared',
         init_seg_with_text='true',
+        mask_cosine_criterion='all',
+        mask_threshold_criterion='all',
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -281,6 +289,9 @@ class SegCriterionV3(FairseqCriterion):
         self.unsupervised_segmentation = resolve_str_true_false(unsupervised_segmentation)
         self.full_context_alignment = resolve_str_true_false(full_context_alignment)
         self.init_seg_with_text = resolve_str_true_false(init_seg_with_text)
+        
+        self.mask_cosine_criterion = mask_cosine_criterion
+        self.mask_threshold_criterion = mask_threshold_criterion
         
         self.unlabeled_target = unlabeled_target
         self.unlabeled_head_type = unlabeled_head_type
@@ -739,14 +750,36 @@ class SegCriterionV3(FairseqCriterion):
             if self.unlabeled_target == 'resnet_cosine':
                 ns = len(logits_teacher)
                 logits_teacher_index = logits_teacher.argmax(-1)
-                mask_cosine = logits_teacher_index[:ns//2] == logits_teacher_index[ns//2:]
+                
+                if self.mask_cosine_criterion == 'same':
+                    mask_cosine = logits_teacher_index[:ns//2] == logits_teacher_index[ns//2:]
+                elif self.mask_cosine_criterion == 'different':
+                    mask_cosine = logits_teacher_index[:ns//2] != logits_teacher_index[ns//2:]
+                elif self.mask_cosine_criterion == 'all':
+                    mask_cosine = torch.ones_like(logits_teacher_index[:ns//2], dtype=torch.bool)
+                else:
+                    raise NotImplementedError
 
                 pred = F.softmax(logits_teacher, dim=-1)
                 max_value, max_index = pred.max(1)
-                threshold_mask = (max_value >= self.unlabeled_threshold)
-                mask_thres = torch.logical_or(threshold_mask[:ns//2], threshold_mask[ns//2:])
-                threshold_mask = torch.logical_and(mask_cosine, mask_thres)
-                threshold_mask = torch.cat([threshold_mask, threshold_mask], dim=0)
+                
+                if self.mask_threshold_criterion == 'or':
+                    threshold_mask = (max_value >= self.unlabeled_threshold)
+                    mask_thres = torch.logical_or(threshold_mask[:ns//2], threshold_mask[ns//2:])     
+                    threshold_mask = torch.logical_and(mask_cosine, mask_thres)
+                    threshold_mask = torch.cat([threshold_mask, threshold_mask], dim=0)
+                elif self.mask_threshold_criterion == 'and':
+                    threshold_mask = (max_value >= self.unlabeled_threshold)
+                    mask_thres = torch.logical_and(threshold_mask[:ns//2], threshold_mask[ns//2:])     
+                    threshold_mask = torch.logical_and(mask_cosine, mask_thres)
+                    threshold_mask = torch.cat([threshold_mask, threshold_mask], dim=0)
+                elif self.mask_threshold_criterion == 'all':
+                    threshold_mask = (max_value >= self.unlabeled_threshold)
+                    mask_cosine = torch.cat([mask_cosine, mask_cosine], dim=0)
+                    threshold_mask = torch.logical_and(mask_cosine, threshold_mask)
+                else:
+                    raise NotImplementedError
+                        
             else:
                 pred = F.softmax(logits_teacher, dim=-1)
                 max_value, max_index = pred.max(1)
