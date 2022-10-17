@@ -213,7 +213,7 @@ class SegmentationTask(OFATask):
         return loss, sample_size, logging_output
 
 
-    def valid_step(self, sample, model, criterion):
+    def valid_step(self, sample, model, criterion, **extra_kwargs):
         model.eval()
         loss, sample_size, logging_output = criterion(model, sample)
 
