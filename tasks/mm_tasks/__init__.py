@@ -7,3 +7,4 @@ from .vqa_gen import VqaGenTask
 from .custom_vqa_gen import CustomVqaGenTask
 from .refvqa import RefVQATask
 from .segmentation import SegmentationTask
+from .segmentation_semi import SegmentationSemiTask

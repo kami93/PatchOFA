@@ -18,3 +18,5 @@ from .seg_criterion_v2 import SegCriterionV2
 from .seg_criterion_v3 import SegCriterionV3
 from .seg_criterion_v4 import SegCriterionV4
 from .seg_criterion_mlp import SegCriterionMLP
+
+from .seg_semi_criterion import SegSemiCriterion

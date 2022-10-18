@@ -3,3 +3,5 @@ from .ofa_masked import MaskedOFAModel, masked_ofa_base_architecture, masked_ofa
 from .patchofa import PatchOFAModel, patchofa_base_architecture, patchofa_large_architecture, patchofa_huge_architecture
 from .segofa import SegOFAModel, segofa_base_architecture, segofa_large_architecture, segofa_huge_architecture
 from .custom_ofa_refVQAgen import CustomOFAModel, customofa_base_architecture, customofa_large_architecture, customofa_huge_architecture, customofa_tiny_architecture
+
+from .segofa_semi import SegOFASemiModel, segofa_semi_base_architecture, segofa_semi_large_architecture, segofa_semi_huge_architecture

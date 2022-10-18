@@ -121,7 +121,7 @@ class FileDataset:
 
     def __getitem__(self, index):
         if self.data_cnt == self.row_count:
-            print("reach the end of datafile, start a new reader")
+            # print("reach the end of datafile, start a new reader")
             self.data_cnt = 0
             self._reader = self._get_reader()
         column_l = self._reader.readline().rstrip("\n").split(self.separator)
