@@ -327,6 +327,10 @@ class SegCriterionV3(FairseqCriterion):
         2) the sample size, which is used as the denominator for the gradient
         3) logging outputs to display while training
         """
+        if self.iter == -1 and update_num != 0:
+            self.iter = self.criterion_update_freq * update_num - 1
+            logger.info(f"Restored iteration counts {self.iter}")
+        
         if self.init_seg_with_text and self.iter == -1:
             # Do lazy initializations;
             def encode_text(text):
