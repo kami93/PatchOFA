@@ -464,7 +464,7 @@ class TransformerEncoder(FairseqEncoder):
                   Only populated if *return_all_hiddens* is True.
         """
         # if masked_forward:
-        forward_scriptable = self.masked_encode
+        forward_scriptable = self.encode
         
         # else:
         #     forward_scriptable = self.encode
@@ -480,7 +480,7 @@ class TransformerEncoder(FairseqEncoder):
                                   token_embeddings,
                                   sample_patch_num)
 
-    def masked_encode(
+    def encode(
         self,
         src_tokens,
         src_lengths,
@@ -544,28 +544,13 @@ class TransformerEncoder(FairseqEncoder):
 
         pos_embed = self.embed_positions(utils.new_arange(src_tokens))
         
-        ##########
-        # fake_image_tokens are input_ids for 1024 text classes
-        # fake_image_token_offsets are offsets for embedding bag
-        bsz = fake_image_tokens.size(0)
-        fake_image_tokens = fake_image_tokens[fake_image_tokens != self.padding_idx]
-        
-        fake_image_token_offsets = rearrange(fake_image_token_offsets, '(b l) -> b l', b=bsz)
-        fake_image_token_offsets = torch.cat([fake_image_token_offsets.new_zeros(size=(bsz, 1)), fake_image_token_offsets], dim=1)
-        offset = torch.cat([fake_image_token_offsets.new_zeros(size=(1, )), fake_image_token_offsets[:-1,-1]]).cumsum(0)
-        fake_image_token_offsets = fake_image_token_offsets + offset.unsqueeze(1)
-        fake_image_token_offsets = fake_image_token_offsets[:, :-1].flatten()
-
-        fake_image_embed = self.embed_tokens_bag(fake_image_tokens, offsets=fake_image_token_offsets)
-        ##########
-
         ######
         ## forward embedding
         # embed tokens and positions
-        if token_embedding is None:
-            token_embedding = self.embed_tokens(src_tokens)
+        if token_embeddings is None:
+            token_embeddings = self.embed_tokens(src_tokens)
 
-        x = embed = self.embed_scale * token_embedding
+        x = embed = self.embed_scale * token_embeddings
         if self.entangle_position_embedding and pos_embed is not None:
             x += pos_embed
         if self.type_embedding is not None:
@@ -579,16 +564,27 @@ class TransformerEncoder(FairseqEncoder):
         # embed raw images
         image_embed_before_scale = self.image_proj(image_embed)
         
-        #######
-        breakpoint()
-        
-        # image_mixed = torch.gather(image_embed_before_scale, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
-        # ids_shuffle
-        
-        
-        ######
-        
-        image_x = image_embed = self.embed_scale * image_embed_before_scale
+        if mix_mask is not None:
+            # fake_image_tokens are input_ids for 1024 text classes
+            # fake_image_token_offsets are offsets for embedding bag
+            bsz = fake_image_tokens.size(0)
+            fake_image_tokens = fake_image_tokens[fake_image_tokens != self.padding_idx]
+            
+            fake_image_token_offsets = rearrange(fake_image_token_offsets, '(b l) -> b l', b=bsz)
+            fake_image_token_offsets = torch.cat([fake_image_token_offsets.new_zeros(size=(bsz, 1)), fake_image_token_offsets], dim=1)
+            offset = torch.cat([fake_image_token_offsets.new_zeros(size=(1, )), fake_image_token_offsets[:-1,-1]]).cumsum(0)
+            fake_image_token_offsets = fake_image_token_offsets + offset.unsqueeze(1)
+            fake_image_token_offsets = fake_image_token_offsets[:, :-1].flatten()
+
+            fake_image_embed = self.embed_tokens_bag(fake_image_tokens, offsets=fake_image_token_offsets)
+            D = fake_image_embed.size(-1)
+            fake_image_embed = rearrange(fake_image_embed, '(b l) d -> b l d', b=bsz)
+            
+            mixed_image_embed_before_scale = torch.where(mix_mask.unsqueeze(-1).expand(-1, -1, D), fake_image_embed, image_embed_before_scale)
+        else:
+            mixed_image_embed_before_scale = image_embed_before_scale
+
+        image_x = image_embed = self.embed_scale * mixed_image_embed_before_scale
         if self.entangle_position_embedding and image_pos_embed is not None:
             image_x += image_pos_embed
         if self.type_embedding is not None:
@@ -601,28 +597,6 @@ class TransformerEncoder(FairseqEncoder):
         x = torch.cat([image_x, x], dim=1)
         embed = torch.cat([image_embed, embed], dim=1)
 
-        if image_embed_2 is not None:
-            assert self.type_embedding is not None
-            image_embed_2 = self.image_proj(image_embed_2)
-            image_x_2 = image_embed_2 = self.embed_scale * image_embed_2
-            if self.entangle_position_embedding and image_pos_embed_2 is not None:
-                image_x_2 += image_pos_embed_2
-            if self.type_embedding is not None:
-                image_x_2 += self.type_embedding(src_tokens.new_full(image_x_2.size()[:2], fill_value=2))
-            if self.patch_layernorm_embedding is not None:
-                image_x_2 = self.patch_layernorm_embedding(image_x_2)
-            image_x_2 = self.dropout_module(image_x_2)
-            if self.quant_noise is not None:
-                image_x_2 = self.quant_noise(image_x_2)
-            x = torch.cat([image_x_2, x], dim=1)
-            embed = torch.cat([image_embed_2, embed], dim=1)
-
-        #############
-        # x, encoder_embedding, image_embed_before_scale = self.forward_embedding(
-        #     src_tokens, image_embed, image_embed_2, token_embeddings,
-        #     pos_embed, image_pos_embed, image_pos_embed_2
-        # )
-        
         # account for padding while computing the representation
         if has_pads:
             x = x * (1 - encoder_padding_mask.unsqueeze(-1).type_as(x))
@@ -634,10 +608,7 @@ class TransformerEncoder(FairseqEncoder):
         if patch_images is not None:
             image_pos_embed = self.image_pos_ln(image_pos_embed)
             pos_embed = torch.cat([image_pos_embed, pos_embed], dim=1)
-        if patch_images_2 is not None:
-            image_pos_embed_2 = self.image_pos_ln(image_pos_embed_2)
-            pos_embed = torch.cat([image_pos_embed_2, pos_embed], dim=1)
-
+        
         pos_q = self.pos_q_linear(pos_embed).view(
             pos_embed.size(0), pos_embed.size(1), self.num_attention_heads, -1
         ).transpose(1, 2) * self.pos_scaling
@@ -657,171 +628,10 @@ class TransformerEncoder(FairseqEncoder):
         for idx, layer in enumerate(self.layers):
             self_attn_bias = abs_pos_bias.clone()
             self_attn_bias[:, :, -src_tokens.size(1):, -src_tokens.size(1):] += self.get_rel_pos_bias(src_tokens, idx)
-            if patch_images_2 is not None:
-                self_attn_bias[:, :, :image_num_patches_2, :image_num_patches_2] += \
-                    self.get_image_rel_pos_bias(image_position_ids_2, idx)
-                self_attn_bias[:, :, image_num_patches_2:image_num_patches_2+image_num_patches, image_num_patches_2:image_num_patches_2+image_num_patches] += \
-                    self.get_image_rel_pos_bias(image_position_ids, idx)
-            elif patch_images is not None:
+            if patch_images is not None:
                 self_attn_bias[:, :, :x.size(0) - src_tokens.size(1), :x.size(0) - src_tokens.size(1)] += \
                     self.get_image_rel_pos_bias(image_position_ids, idx)
-            self_attn_bias = self_attn_bias.reshape(-1, self_attn_bias.size(2), self_attn_bias.size(2))
-            if self.args.encoder_prompt:
-                if self.args.encoder_prompt_type != "prompt":
-                    prompt_kv = prompt_kv_list[idx]
-                else:
-                    if idx == 0:
-                        prompt_kv = prompt_kv_list[idx]
-                    else:
-                        prompt_kv = None
-            else:
-                prompt_kv = None 
-            x = layer(x, encoder_padding_mask=encoder_padding_mask if has_pads else None, \
-                    self_attn_bias=self_attn_bias, prompt_kv=prompt_kv)
-            if return_all_hiddens:
-                assert encoder_states is not None
-                encoder_states.append(x)
-
-        if self.layer_norm is not None:
-            x = self.layer_norm(x)
-        if self.args.encoder_prompt:
-            encoder_padding_mask = encoder_padding_mask[:, prompt_tokens.size(1):]
-        # The Pytorch Mobile lite interpreter does not supports returning NamedTuple in
-        # `forward` so we use a dictionary instead.
-        # TorchScript does not support mixed values so the values are all lists.
-        # The empty list is equivalent to None.
-
-        encoder_embedding = self.embed_tokens.weight.clone()
-        return {
-            "encoder_out": [x],  # T x B x C
-            "encoder_padding_mask": [encoder_padding_mask],  # B x T
-            "encoder_embedding": [encoder_embedding],  # B x T x C
-            "encoder_states": encoder_states,  # List[T x B x C]
-            "src_tokens": [],
-            "src_lengths": [],
-            "position_embeddings": [pos_embed],  # B x T x C
-            "patch_images": [patch_images],
-            "image_embed_before_scale": [image_embed_before_scale],
-            "image_embed_shape": [image_embed_shape],
-            "image_embed_before_proj": [image_embed]
-        }
-
-    def encode(
-        self,
-        src_tokens,
-        src_lengths,
-        patch_images: Optional[torch.Tensor] = None,
-        patch_images_2: Optional[torch.Tensor] = None,
-        patch_masks: Optional[torch.Tensor] = None,
-        return_all_hiddens: bool = False,
-        token_embeddings: Optional[torch.Tensor] = None,
-        sample_patch_num: Optional[int] = None
-    ):
-        """
-        Args:
-            src_tokens (LongTensor): tokens in the source language of shape
-                `(batch, src_len)`
-            src_lengths (torch.LongTensor): lengths of each source sentence of
-                shape `(batch)`
-            return_all_hiddens (bool, optional): also return all of the
-                intermediate hidden states (default: False).
-            token_embeddings (torch.Tensor, optional): precomputed embeddings
-                default `None` will recompute embeddings
-
-        Returns:
-            dict:
-                - **encoder_out** (Tensor): the last encoder layer's output of
-                  shape `(src_len, batch, embed_dim)`
-                - **encoder_padding_mask** (ByteTensor): the positions of
-                  padding elements of shape `(batch, src_len)`
-                - **encoder_embedding** (Tensor): the (scaled) embedding lookup
-                  of shape `(batch, src_len, embed_dim)`
-                - **encoder_states** (List[Tensor]): all intermediate
-                  hidden states of shape `(src_len, batch, embed_dim)`.
-                  Only populated if *return_all_hiddens* is True.
-        """
-        prompt_tokens = None
-        prompt_padding_mask = None
-        prompt_kv_list = None
-        if self.args.encoder_prompt:
-            bsz, seq_len = src_tokens.shape[0], src_tokens.shape[1]
-            if self.args.encoder_prompt_type in ("prefix"):
-                prompt_tokens = torch.arange(
-                    0, self.args.encoder_prompt_length).to(
-                    src_tokens.device)
-                prompt_tokens = prompt_tokens.unsqueeze(0).expand(bsz, -1)
-                prompt_padding_mask = torch.zeros_like(prompt_tokens).to(prompt_tokens.device)
-            prompt_kv_list = self.get_encoder_prompt(prompt_tokens)
-        image_embed = None
-        image_embed_2 = None
-        image_pos_embed = None
-        image_pos_embed_2 = None
-        if patch_images is not None:
-            image_embed, image_num_patches, image_padding_mask, image_position_ids, image_pos_embed, image_embed_shape = \
-                self.get_patch_images_info(patch_images, sample_patch_num, src_tokens.device)
-            image_padding_mask[~patch_masks] = True            
             
-        if patch_images_2 is not None:
-            image_embed_2, image_num_patches_2, image_padding_mask_2, image_position_ids_2, image_pos_embed_2 = \
-                self.get_patch_images_info(patch_images_2, sample_patch_num, src_tokens.device)
-            image_padding_mask_2[~patch_masks] = True
-
-        encoder_padding_mask = src_tokens.eq(self.padding_idx)
-        if patch_images is not None:
-            encoder_padding_mask = torch.cat([image_padding_mask, encoder_padding_mask], dim=1)
-        if patch_images_2 is not None:
-            encoder_padding_mask = torch.cat([image_padding_mask_2, encoder_padding_mask], dim=1)
-        has_pads = (src_tokens.device.type == "xla" or encoder_padding_mask.any())
-
-        pos_embed = self.embed_positions(utils.new_arange(src_tokens))
-        
-        x, encoder_embedding, image_embed_before_scale = self.forward_embedding(
-            src_tokens, image_embed, image_embed_2, token_embeddings,
-            pos_embed, image_pos_embed, image_pos_embed_2
-        )
-        
-        # account for padding while computing the representation
-        if has_pads:
-            x = x * (1 - encoder_padding_mask.unsqueeze(-1).type_as(x))
-
-        # B x T x C -> T x B x C
-        x = x.transpose(0, 1)
-
-        pos_embed = self.pos_ln(pos_embed)
-        if patch_images is not None:
-            image_pos_embed = self.image_pos_ln(image_pos_embed)
-            pos_embed = torch.cat([image_pos_embed, pos_embed], dim=1)
-        if patch_images_2 is not None:
-            image_pos_embed_2 = self.image_pos_ln(image_pos_embed_2)
-            pos_embed = torch.cat([image_pos_embed_2, pos_embed], dim=1)
-
-        pos_q = self.pos_q_linear(pos_embed).view(
-            pos_embed.size(0), pos_embed.size(1), self.num_attention_heads, -1
-        ).transpose(1, 2) * self.pos_scaling
-        pos_k = self.pos_k_linear(pos_embed).view(
-            pos_embed.size(0), pos_embed.size(1), self.num_attention_heads, -1
-        ).transpose(1, 2)
-        abs_pos_bias = torch.matmul(pos_q, pos_k.transpose(2, 3))
-
-        encoder_states = []
-
-        if return_all_hiddens:
-            encoder_states.append(x)
-
-        if prompt_padding_mask is not None:
-            encoder_padding_mask = torch.cat([prompt_padding_mask, encoder_padding_mask], dim=1)
-        # encoder layers
-        for idx, layer in enumerate(self.layers):
-            self_attn_bias = abs_pos_bias.clone()
-            self_attn_bias[:, :, -src_tokens.size(1):, -src_tokens.size(1):] += self.get_rel_pos_bias(src_tokens, idx)
-            if patch_images_2 is not None:
-                self_attn_bias[:, :, :image_num_patches_2, :image_num_patches_2] += \
-                    self.get_image_rel_pos_bias(image_position_ids_2, idx)
-                self_attn_bias[:, :, image_num_patches_2:image_num_patches_2+image_num_patches, image_num_patches_2:image_num_patches_2+image_num_patches] += \
-                    self.get_image_rel_pos_bias(image_position_ids, idx)
-            elif patch_images is not None:
-                self_attn_bias[:, :, :x.size(0) - src_tokens.size(1), :x.size(0) - src_tokens.size(1)] += \
-                    self.get_image_rel_pos_bias(image_position_ids, idx)
             self_attn_bias = self_attn_bias.reshape(-1, self_attn_bias.size(2), self_attn_bias.size(2))
             if self.args.encoder_prompt:
                 if self.args.encoder_prompt_type != "prompt":

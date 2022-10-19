@@ -111,12 +111,17 @@ def collate(samples, pad_idx, eos_idx):
         target_labeled = merge("target_labeled")
         downsampled_target_labeled = merge("downsampled_target_labeled")
         
+        fake_image_tokens = merge("fake_image_tokens")
+        fake_image_token_offsets = torch.cat([sample['fake_image_token_offsets'] for sample in samples])
+        
         labeled_input = {
             "src_tokens": src_tokens_labeled,
             "src_lengths": src_lengths_labeled,
             "patch_images": patch_images_labeled,
             "patch_masks": patch_masks_labeled,
-            "prev_output_tokens": prev_output_tokens_labeled
+            "prev_output_tokens": prev_output_tokens_labeled,
+            "fake_image_tokens": fake_image_tokens,
+            "fake_image_token_offsets": fake_image_token_offsets,
         }
         
     batch = {
@@ -206,7 +211,6 @@ class SegmentationSemiDataset(OFADataset):
         self.id2text = [self.encode_text(f" {x}") for x in CLASSES]
         self.text_length = torch.tensor([len(x) for x in self.id2text])
         
-        self.fakeimage_type = cfg.fakeimage_type
         self.prompt_type = cfg.prompt_type
         self.labeled_prompt_type = cfg.labeled_prompt_type
         
@@ -395,6 +399,13 @@ class SegmentationSemiDataset(OFADataset):
             example["target_labeled"] = target_labeled
             example["downsampled_target_labeled"] = downsampled_target_labeled
             example["prev_output_tokens_labeled"] = prev_output_item_labeled
+            
+            fake_image_tokens = torch.cat([self.id2text[idx] for idx in gt_semantic_seg_downsampled])
+            fake_image_token_offsets = torch.tensor([self.text_length[idx] for idx in gt_semantic_seg_downsampled], dtype=torch.long)
+
+            example["fake_image_tokens"] = fake_image_tokens
+            example["fake_image_token_offsets"] = fake_image_token_offsets.cumsum(dim=0)
+            
         
         return example
 

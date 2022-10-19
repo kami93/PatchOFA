@@ -133,31 +133,6 @@ class SegOFASemiMaskedModel(TransformerModel):
                     x = head(sentence_representation)
                     break
                 
-        if labeled_input is not None:
-            encoder_out_labeled = self.encoder(
-            src_tokens=labeled_input.get('src_tokens'),
-            src_lengths=labeled_input.get('src_lengths'),
-            patch_images=labeled_input.get('patch_images'),
-            patch_masks=labeled_input.get('patch_masks'),
-            patch_images_2=None,
-            token_embeddings=None,
-            return_all_hiddens=return_all_hiddens,
-            sample_patch_num=sample_patch_num
-            )
-            
-            labeled_output = self.decoder(
-                labeled_input.get('prev_output_tokens'),
-                encoder_out=encoder_out_labeled,
-                features_only=features_only,
-                full_context_alignment=full_context_alignment,
-                alignment_layer=alignment_layer,
-                alignment_heads=alignment_heads,
-                src_lengths=labeled_input.get('src_lengths'),
-                return_all_hiddens=return_all_hiddens
-            )
-            
-            extra['labeled_output'] = labeled_output            
-
         return x, extra
 
     def register_embedding_tokens(self, ans2label_dict, src_dict, bpe):

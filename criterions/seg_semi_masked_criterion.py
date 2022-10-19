@@ -147,6 +147,9 @@ class SegSemiMaskedCriterionConfig(FairseqDataclass):
     mask_threshold_criterion: str = field(
         default='all', metadata={"help": "or | and | all"}
     )
+    mix_ratio: float = field(
+        default=0.0, metadata={"help": "mask mixing ratio"}
+    )
     
 def resolve_str_true_false(x):
     x = x.lower()
@@ -259,6 +262,8 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         init_seg_with_text='true',
         mask_cosine_criterion='all',
         mask_threshold_criterion='all',
+        mix_ratio=0.0,
+        
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -296,6 +301,8 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         self.unlabeled_target = unlabeled_target
         self.unlabeled_head_type = unlabeled_head_type
         
+        self.mix_ratio = mix_ratio
+        
         self.seg_id_offset = task.target_dictionary.index("<seg_0>")
         self.constraint_start = None
         self.constraint_end = None
@@ -308,11 +315,12 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             # assert self.student_temperature == 1.0
             output_classes = 150
         elif self.unlabeled_head_type == 'separate':
-            output_classes = 8192
-            self.unlabeled_head = DINOHead(in_dim=256, out_dim=output_classes, use_bn=False, nlayers=3, hidden_dim=2048, bottleneck_dim=256)
+            # output_classes = 8192
+            # self.unlabeled_head = DINOHead(in_dim=256, out_dim=output_classes, use_bn=False, nlayers=3, hidden_dim=2048, bottleneck_dim=256)
+            self.unlabeled_head = nn.Linear(256, 256, bias=True)
         else:
             raise NotImplementedError
-                
+                        
         if self.use_centering:
             self.register_buffer("center", torch.zeros(size=(1, output_classes))) # self.center
             self.register_buffer("center_accumulation", torch.zeros(size=(1, output_classes)), persistent=False) # tmp buffer for accumulated updates. # self.center_accumulation
@@ -403,63 +411,85 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             construct_rdrop_sample(sample)
         
         #######
-        # generate masks for mixing
-        N, L = sample['downsampled_target'].shape[:2]
-        self.mix_ratio = 0.7
-        len_mix = int(L * (1 - self.mix_ratio))
-        
-        noise = torch.rand(N, L, device='cuda')  # noise in [0, 1]
-        
-        # sort noise for each sample
-        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
-        ids_keep = ids_shuffle[:, len_mix:]
-        
-        mix_mask = torch.ones([N, L], dtype=torch.bool, device='cuda')
-        mix_mask = mix_mask.scatter_(dim=1, index=ids_keep, src=torch.zeros_like(ids_keep, dtype=torch.bool, device='cuda'))
-        
-        breakpoint()
-        # ids_restore = torch.argsort(ids_shuffle, dim=1)
-
-        # keep the first subset
-        # ids_keep = ids_shuffle[:, :len_keep]
-        # x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
-
-        # generate the binary mask: 0 is keep, 1 is remove
-        # mask = torch.ones([N, L], device=x.device)
-        # mask[:, :len_keep] = 0
-        # # unshuffle to get the binary mask
-        # mask = torch.gather(mask, dim=1, index=ids_restore)
-        
-        #######
-        
-        
         if model.training:
-            net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment, mix_mask=mix_mask)
-            labeled_loss = self.compute_labeled_loss(model, net_output, sample, update_num, reduce=reduce)
+            # generate masks for mixing
+            N, L = sample['downsampled_target'].shape[:2]
+            len_mix = int((L-1) * (1 - self.mix_ratio))
+            noise = torch.rand(N, (L-1), device='cuda')  # noise in [0, 1]
             
-        else:
-            net_output = model(**sample["net_input"])
-            labeled_loss = net_output[0].new_zeros(size=(1, ))
+            # sort noise for each sample
+            ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+            ids_keep = ids_shuffle[:, len_mix:]
+            
+            mix_mask = torch.zeros([N, L], dtype=torch.bool, device='cuda')
+            mix_mask = mix_mask.scatter_(dim=1, index=ids_keep, src=torch.ones_like(ids_keep, dtype=torch.bool, device='cuda'))
+            
+            net_output = model(**sample["labeled_input"], full_context_alignment=self.full_context_alignment, mix_mask=mix_mask[:,:-1])
+            labeled_loss_img, labeled_loss_text = self.compute_labeled_loss(model, net_output, sample, update_num, reduce=reduce, mix_mask=mix_mask)
+            
+        with torch.no_grad():
+            metric_output = model(**sample["net_input"])
 
-        # torch.save(net_output, "net_output.pt")
-        # torch.save(sample, "sample.pt")
+        classifier_logits_lowres, extra = metric_output
 
-        if self.unsupervised_segmentation:
-            compute_seg_loss = self.compute_unlabled_kld_loss
-        else:
-            compute_seg_loss = self.compute_loss
-                
-        seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
+        target_lowres = sample.get("downsampled_target")
+        sample_masks_lowres = None # ignoring idx mask for "sample" dimension
+
+        classifier_logits_lowres = classifier_logits_lowres.float()
+        target_lowres_shape = target_lowres.shape
+        assert target_lowres_shape == classifier_logits_lowres.shape[:-1]
+
+        sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+150))
+        if self.ignore_eos:
+            eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
+            sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
+
+        # calculate upscaled versions
+        target = sample.get("target")
+        sample_masks = None
+        constraint_masks = None
+
+        classifier_logits = self.upsample_logits(classifier_logits_lowres) # bilinear upsample
+        target_shape = target.shape
+        assert target_shape == classifier_logits.shape[:-1]
+
+        sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+150))
+        if self.ignore_eos:
+            eos_masks = target.eq(self.task.tgt_dict.eos())
+            sample_masks = torch.logical_or(sample_masks, eos_masks)
+
+        # apply masking to targets
+        target_lowres = target_lowres[~sample_masks_lowres] - self.seg_id_offset
+        target = target[~sample_masks] - self.seg_id_offset
+
+        ntokens = 1
+        metrics = dict()
+        with torch.no_grad():
+            classifier_logits_lowres = classifier_logits_lowres[~sample_masks_lowres]
+            classifier_logits = classifier_logits[~sample_masks]
+            metrics["nll_loss"] = F.cross_entropy(classifier_logits_lowres.detach(), target_lowres.detach()) # just for display
+
+            area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_logits_lowres.detach(), target_lowres.detach())
+            metrics["area_intersect_lowres"] = area_intersect_lowres
+            metrics["area_pred_label_lowres"] = area_pred_label_lowres
+            metrics["area_label_lowres"] = area_label_lowres
+            metrics["area_union_lowres"] = area_union_lowres
+
+            area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_logits.detach(), target.detach())
+            metrics["area_intersect"] = area_intersect
+            metrics["area_pred_label"] = area_pred_label
+            metrics["area_label"] = area_label
+            metrics["area_union"] = area_union
         
-        loss = (1.0 - self.effective_alpha) * labeled_loss + self.effective_alpha * seg_loss
+        loss = (1.0 - self.alpha) * labeled_loss_img + self.alpha * labeled_loss_text
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
         
         logging_output = {
             "loss": loss.data,
-            "labeled_loss": labeled_loss.data,
-            "seg_loss": seg_loss.data,
+            "text_loss": labeled_loss_text.data,
+            "image_loss": labeled_loss_img.data,
             "alpha_coefficient": self.effective_alpha, # 20221006 수정사항: alpha coefficient 로깅
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
@@ -648,10 +678,11 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             
         return lprobs.view(-1, lprobs.size(-1)), target.view(-1), lprobs_lowres.view(-1, lprobs_lowres.size(-1)), target_lowres.view(-1), constraint_masks
         
-    def compute_labeled_loss(self, model, net_output, sample, update_num, reduce=True):
+    def compute_labeled_loss(self, model, net_output, sample, update_num, reduce=True, mix_mask=None):
         classifier_logits_lowres, extra = net_output
         # calculate upscaled versions
         if self.upscale_lprobs:
+            raise NotImplementedError
             classifier_logits = self.upsample_logits(classifier_logits_lowres) # bilinear upsample
 
             target = sample.get("target_labeled")
@@ -659,35 +690,59 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             assert target_shape == classifier_logits.shape[:-1]
 
             sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+150))
-            if self.ignore_eos:
-                eos_masks = target.eq(self.task.tgt_dict.eos())
-                sample_masks = torch.logical_or(sample_masks, eos_masks)
-            target = target[~sample_masks] - self.seg_id_offset
-            classifier_logits = classifier_logits[~sample_masks]
+            assert self.ignore_eos
+            
+            eos_masks = target.eq(self.task.tgt_dict.eos())
+            # sample_masks = torch.logical_or(sample_masks, eos_masks)
+            
+            sample_masks_img = torch.logical_or(sample_masks, eos_masks, mix_mask)
+            sample_masks_text = torch.logical_or(sample_masks, eos_masks, ~mix_mask)
+                
+            target = target - self.seg_id_offset
+    
+            target_img = target[~sample_masks_img]
+            target_text = target[~sample_masks_text]
+        
             logits_labeled = classifier_logits
             target_labeled = target
         else:
             target_lowres = sample.get("downsampled_target_labeled")
             sample_masks_lowres = None # ignoring idx mask for "sample" dimension
             classifier_logits_lowres = classifier_logits_lowres.float()
+            penultimate_lowres = extra['penultimate']
+            
+            if self.unlabeled_head_type == 'separate':
+                penultimate_lowres = self.unlabeled_head(penultimate_lowres)
             
             target_lowres_shape = target_lowres.shape
             assert target_lowres_shape == classifier_logits_lowres.shape[:-1]
 
             sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+150))
-            if self.ignore_eos:
-                eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
-                sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
+            assert self.ignore_eos
+            
+            eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
+            
+            sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
+            sample_masks_lowres_img = torch.logical_or(sample_masks_lowres, mix_mask)
+            sample_masks_lowres_text = torch.logical_or(sample_masks_lowres, ~mix_mask)
+                
+            target_lowres = target_lowres - self.seg_id_offset
+    
+            target_lowres_img = target_lowres[~sample_masks_lowres_img]
+            target_lowres_text = extra['encoder_returns']['image_embed_before_scale'][0][~sample_masks_lowres_text[:, :-1]].float()
 
-            # apply masking to targets
-            target_lowres = target_lowres[~sample_masks_lowres] - self.seg_id_offset
-            classifier_logits_lowres = classifier_logits_lowres[~sample_masks_lowres]
-            logits_labeled = classifier_logits_lowres
-            target_labeled = target_lowres
+            classifier_logits_lowres_img = classifier_logits_lowres[~sample_masks_lowres_img]
+            classifier_logits_lowres_text = penultimate_lowres[~sample_masks_lowres_text].float()
+            
+        loss_img = F.cross_entropy(classifier_logits_lowres_img, target_lowres_img.detach(), label_smoothing=self.eps)
 
-        loss = F.cross_entropy(logits_labeled, target_labeled.detach(), label_smoothing=self.eps)
+        mean = target_lowres_text.mean(-1, keepdim=True)
+        var = target_lowres_text.var(-1, keepdim=True)
+        target_lowres_text = (target_lowres_text - mean) / (var + 1.e-6)**.5
 
-        return loss
+        loss_text = F.mse_loss(classifier_logits_lowres_text, target_lowres_text.detach())
+
+        return loss_img, loss_text
 
     def compute_unlabled_kld_loss(self, model, net_output, sample, update_num, reduce=True, ema_model=None):
         classifier_logits_lowres, extra = net_output
@@ -999,8 +1054,8 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         """Aggregate logging outputs from data parallel training."""
         loss_sum = sum(log.get("loss", 0) for log in logging_outputs)
         nll_loss_sum = sum(log.get("nll_loss", 0) for log in logging_outputs)
-        labeled_loss_sum = sum(log.get("labeled_loss", 0) for log in logging_outputs)
-        seg_loss_sum = sum(log.get("seg_loss", 0) for log in logging_outputs)
+        text_loss_sum = sum(log.get("text_loss", 0) for log in logging_outputs)
+        image_loss_sum = sum(log.get("image_loss", 0) for log in logging_outputs)
         ntokens = sum(log.get("ntokens", 0) for log in logging_outputs)
         nsentences = sum(log.get("nsentences", 0) for log in logging_outputs)
         sample_size = sum(log.get("sample_size", 0) for log in logging_outputs)
@@ -1028,44 +1083,44 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             "loss", loss_sum / sample_size, sample_size, round=3
         )
         metrics.log_scalar(
-            "labeled_loss", labeled_loss_sum / sample_size, ntokens, round=3
+            "text_loss", text_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_scalar(
-            "seg_loss", seg_loss_sum / sample_size, ntokens, round=3
+            "image_loss", image_loss_sum / sample_size, ntokens, round=3
         )
         metrics.log_scalar(
             "nll_loss", nll_loss_sum / sample_size, ntokens, round=3
         )
-        metrics.log_derived(
-            "ppl", lambda meters: utils.get_perplexity(meters["nll_loss"].avg)
-        )
-        metrics.log_scalar(
-            "ntokens", ntokens, 1, round=3
-        )
-        metrics.log_scalar(
-            "nsentences", nsentences, 1, round=3
-        )
-        metrics.log_scalar(
-            "sample_size", sample_size, 1, round=3
-        )
+        # metrics.log_derived(
+        #     "ppl", lambda meters: utils.get_perplexity(meters["nll_loss"].avg)
+        # )
+        # metrics.log_scalar(
+        #     "ntokens", ntokens, 1, round=3
+        # )
+        # metrics.log_scalar(
+        #     "nsentences", nsentences, 1, round=3
+        # )
+        # metrics.log_scalar(
+        #     "sample_size", sample_size, 1, round=3
+        # )
         
         # 20221006 수정사항: alpha coefficient 로깅
-        metrics.log_scalar(
-            "alpha_coefficient", alpha_coefficient / sample_size, 1, round=3
-        )
-        metrics.log_scalar(
-            "threshold_mask_ratio", threshold_mask_ratio_sum / sample_size, 1, round=3
-        )
-        metrics.log_scalar(
-            "threshold_acc", threshold_acc_sum / sample_size, 1, round=3
-        )
+        # metrics.log_scalar(
+        #     "alpha_coefficient", alpha_coefficient / sample_size, 1, round=3
+        # )
+        # metrics.log_scalar(
+        #     "threshold_mask_ratio", threshold_mask_ratio_sum / sample_size, 1, round=3
+        # )
+        # metrics.log_scalar(
+        #     "threshold_acc", threshold_acc_sum / sample_size, 1, round=3
+        # )
 
-        metrics.log_scalar(
-            "abs_center_max", abs_center_max / sample_size, 1, round=3
-        )
-        metrics.log_scalar(
-            "abs_center_mean", abs_center_mean / sample_size, 1, round=3
-        )
+        # metrics.log_scalar(
+        #     "abs_center_max", abs_center_max / sample_size, 1, round=3
+        # )
+        # metrics.log_scalar(
+        #     "abs_center_mean", abs_center_mean / sample_size, 1, round=3
+        # )
         metrics.log_scalar_sum(
             "_area_intersect", area_intersect_sum, 1
         )
