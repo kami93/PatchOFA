@@ -411,6 +411,7 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             construct_rdrop_sample(sample)
         
         #######
+        logging_output = {}
         if model.training:
             # generate masks for mixing
             N, L = sample['downsampled_target'].shape[:2]
@@ -426,7 +427,13 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             
             net_output = model(**sample["labeled_input"], full_context_alignment=self.full_context_alignment, mix_mask=mix_mask[:,:-1])
             labeled_loss_img, labeled_loss_text = self.compute_labeled_loss(model, net_output, sample, update_num, reduce=reduce, mix_mask=mix_mask)
-            
+            loss = (1.0 - self.alpha) * labeled_loss_img + self.alpha * labeled_loss_text
+            logging_output['loss'] = loss.data
+            logging_output['image_loss'] = labeled_loss_img.data
+            logging_output['text_loss'] = labeled_loss_text.data
+        else:
+            loss = torch.zeros(size=(1, 0), device='cuda')
+
         with torch.no_grad():
             metric_output = model(**sample["net_input"])
 
@@ -481,20 +488,19 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             metrics["area_label"] = area_label
             metrics["area_union"] = area_union
         
-        loss = (1.0 - self.alpha) * labeled_loss_img + self.alpha * labeled_loss_text
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
         
-        logging_output = {
-            "loss": loss.data,
-            "text_loss": labeled_loss_text.data,
-            "image_loss": labeled_loss_img.data,
+        logging_output.update(
+            {
             "alpha_coefficient": self.effective_alpha, # 20221006 수정사항: alpha coefficient 로깅
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
-        }
+            }
+        )
+        
         for key, value in metrics.items():
             if isinstance(value, torch.Tensor):
                 value = value.data
@@ -509,9 +515,9 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             n_correct, total = self.compute_accuracy(model, net_output, sample)
             logging_output["n_correct"] = utils.item(n_correct.data)
             logging_output["total"] = utils.item(total.data)
+        
         return loss, sample_size, logging_output
 
-    
     def upsample_logits(self, logits):
         logits_ = logits[:, :-1]
         logits_ = rearrange(logits_, 'b (h w) d -> b d h w', h=32, w=32)
