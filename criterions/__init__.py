@@ -20,3 +20,4 @@ from .seg_criterion_v4 import SegCriterionV4
 from .seg_criterion_mlp import SegCriterionMLP
 
 from .seg_semi_criterion import SegSemiCriterion
+from .seg_semi_masked_criterion import SegSemiMaskedCriterion
