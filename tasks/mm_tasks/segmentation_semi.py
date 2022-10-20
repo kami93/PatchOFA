@@ -135,7 +135,7 @@ class SegmentationSemiTask(OFATask):
         assert len(paths) > 0
 
         if split == 'train':
-            table_path = paths[(epoch - 1) % (len(paths) - 1)]
+            table_path = paths[0] # paths[(epoch - 1) % (len(paths) - 1)]
         else:
             table_path = paths[-1]
         
@@ -144,7 +144,7 @@ class SegmentationSemiTask(OFATask):
         
         if split == 'train':
             labeled_num_samples = self.cfg.labeled_num_samples
-            dataset_labeled = FileDataset(paths[0], self.cfg.selected_cols)
+            dataset_labeled = FileDataset(paths[1], self.cfg.selected_cols)
             dataset_labeled.total_row_count = labeled_num_samples
             dataset_labeled._compute_start_pos_and_row_count()
             

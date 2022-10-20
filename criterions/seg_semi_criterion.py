@@ -2,7 +2,7 @@
 # All rights reserved.
 # This source code is licensed under the Apache 2.0 license 
 # found in the LICENSE file in the root directory.
-
+import pickle as pkl
 import math
 from dataclasses import dataclass, field
 from re import S, X
@@ -147,6 +147,9 @@ class SegSemiCriterionConfig(FairseqDataclass):
     mask_threshold_criterion: str = field(
         default='all', metadata={"help": "or | and | all"}
     )
+    use_alignment: str = field(
+        default='false', metadata={"help": "whether to use distribution alignment."}
+    )
     
 def resolve_str_true_false(x):
     x = x.lower()
@@ -259,6 +262,7 @@ class SegSemiCriterion(FairseqCriterion):
         init_seg_with_text='true',
         mask_cosine_criterion='all',
         mask_threshold_criterion='all',
+        use_alignment='false'
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -289,6 +293,7 @@ class SegSemiCriterion(FairseqCriterion):
         self.unsupervised_segmentation = resolve_str_true_false(unsupervised_segmentation)
         self.full_context_alignment = resolve_str_true_false(full_context_alignment)
         self.init_seg_with_text = resolve_str_true_false(init_seg_with_text)
+        self.use_alignment = resolve_str_true_false(use_alignment)
         
         self.mask_cosine_criterion = mask_cosine_criterion
         self.mask_threshold_criterion = mask_threshold_criterion
@@ -312,7 +317,14 @@ class SegSemiCriterion(FairseqCriterion):
             self.unlabeled_head = DINOHead(in_dim=256, out_dim=output_classes, use_bn=False, nlayers=3, hidden_dim=2048, bottleneck_dim=256)
         else:
             raise NotImplementedError
-                
+        
+        if self.use_alignment:
+            labeled_num_samples = task.cfg.labeled_num_samples
+            with open(f"label_avg_{labeled_num_samples}.pkl", "rb") as f:
+                label_avg = torch.tensor(pkl.load(f)).unsqueeze(0)
+                self.register_buffer("label_avg", label_avg, persistent=False) # self.label_avg
+            self.unlabel_avg = []
+        
         if self.use_centering:
             self.register_buffer("center", torch.zeros(size=(1, output_classes))) # self.center
             self.register_buffer("center_accumulation", torch.zeros(size=(1, output_classes)), persistent=False) # tmp buffer for accumulated updates. # self.center_accumulation
@@ -398,6 +410,9 @@ class SegSemiCriterion(FairseqCriterion):
             self.center = self.center.to('cuda')
             self.center_accumulation = self.center_accumulation.to('cuda')
             self.center_batch_size = self.center_batch_size.to('cuda')
+        
+        if self.use_alignment:
+            self.label_avg = self.label_avg.to('cuda')
             
         if self.use_rdrop:
             construct_rdrop_sample(sample)
@@ -817,6 +832,19 @@ class SegSemiCriterion(FairseqCriterion):
                 pred = F.softmax(logits_teacher, dim=-1)
                 max_value, max_index = pred.max(1)
                 threshold_mask = (max_value >= self.unlabeled_threshold)
+
+            if self.use_alignment and self.effective_alpha != 0.0:
+                self.unlabel_avg.append(pred.mean(0))
+                self.unlabel_avg = self.unlabel_avg[-(128 // get_world_size()):]
+                unlabel_avg = torch.stack(self.unlabel_avg, dim=0)
+                unlabel_avg = unlabel_avg.mean(0, keepdim=True)
+
+                if is_dist_avail_and_initialized() and get_world_size() > 1:
+                    dist.all_reduce(unlabel_avg)
+                    unlabel_avg = unlabel_avg / get_world_size()
+                                
+                target_ankor = (1e-6 + self.label_avg) / (1e-6 + unlabel_avg)
+                pred = pred * target_ankor.detach()
 
             if self.teacher_temperature == 0.0:
                 teacher = max_index
