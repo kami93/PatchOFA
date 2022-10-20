@@ -150,6 +150,9 @@ class SegSemiCriterionConfig(FairseqDataclass):
     use_alignment: str = field(
         default='false', metadata={"help": "whether to use distribution alignment."}
     )
+    unlabeled_loss_type: str = field(
+        default='ce', metadata={"help": "ce | focal"}
+    )
     
 def resolve_str_true_false(x):
     x = x.lower()
@@ -262,7 +265,8 @@ class SegSemiCriterion(FairseqCriterion):
         init_seg_with_text='true',
         mask_cosine_criterion='all',
         mask_threshold_criterion='all',
-        use_alignment='false'
+        use_alignment='false',
+        unlabeled_loss_type='ce'
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -300,6 +304,7 @@ class SegSemiCriterion(FairseqCriterion):
         
         self.unlabeled_target = unlabeled_target
         self.unlabeled_head_type = unlabeled_head_type
+        self.unlabeled_loss_type = unlabeled_loss_type
         
         self.seg_id_offset = task.target_dictionary.index("<seg_0>")
         self.constraint_start = None
@@ -858,7 +863,13 @@ class SegSemiCriterion(FairseqCriterion):
         else:
             logits_student = logits_student[:, :-1].reshape(-1, logits_student.size(-1))
 
-        unlabeled_loss = (F.cross_entropy(logits_student, teacher.detach(), reduction='none') * threshold_mask).mean()
+        if self.unlabeled_loss_type == 'ce':
+            unlabeled_loss = (F.cross_entropy(logits_student, teacher.detach(), reduction='none') * threshold_mask).mean()
+        elif self.unlabeled_loss_type == 'focal':
+            prob = logits_student.softmax(-1).max(-1)[0]
+            unlabeled_loss = (F.cross_entropy(logits_student, teacher.detach(), reduction='none') * threshold_mask * (1 - prob)**2).mean()
+        else:
+            raise NotImplementedError
         ntokens = 1
 
         metrics = dict()

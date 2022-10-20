@@ -147,10 +147,17 @@ class SegSemiMaskedCriterionConfig(FairseqDataclass):
     mask_threshold_criterion: str = field(
         default='all', metadata={"help": "or | and | all"}
     )
+    random_mix_ratio: str = field(
+        default='false', metadata={"help": "use random mask mixing ratio (overrides mix_ratio if true"}
+    )
     mix_ratio: float = field(
         default=0.0, metadata={"help": "mask mixing ratio"}
     )
+    img_loss_type: str = field(
+        default='ce', metadata={"help": "ce | mse"}
+    )
     
+
 def resolve_str_true_false(x):
     x = x.lower()
     if x == 'true':
@@ -263,7 +270,8 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         mask_cosine_criterion='all',
         mask_threshold_criterion='all',
         mix_ratio=0.0,
-        
+        random_mix_ratio='true',
+        img_loss_type='ce',
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -294,6 +302,7 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         self.unsupervised_segmentation = resolve_str_true_false(unsupervised_segmentation)
         self.full_context_alignment = resolve_str_true_false(full_context_alignment)
         self.init_seg_with_text = resolve_str_true_false(init_seg_with_text)
+        self.random_mix_ratio = resolve_str_true_false(random_mix_ratio)
         
         self.mask_cosine_criterion = mask_cosine_criterion
         self.mask_threshold_criterion = mask_threshold_criterion
@@ -302,6 +311,7 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         self.unlabeled_head_type = unlabeled_head_type
         
         self.mix_ratio = mix_ratio
+        self.img_loss_type = img_loss_type
         
         self.seg_id_offset = task.target_dictionary.index("<seg_0>")
         self.constraint_start = None
@@ -415,7 +425,15 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         if model.training:
             # generate masks for mixing
             N, L = sample['downsampled_target'].shape[:2]
-            len_mix = int((L-1) * (1 - self.mix_ratio))
+            
+            if self.random_mix_ratio:
+                alpha = 0.75
+                l = np.random.beta(alpha, alpha)
+                mix_ratio = min(l, 1-l)
+            else:
+                mix_ratio = self.mix_ratio
+
+            len_mix = int((L-1) * (1 - mix_ratio))
             noise = torch.rand(N, (L-1), device='cuda')  # noise in [0, 1]
             
             # sort noise for each sample
@@ -437,14 +455,21 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         with torch.no_grad():
             metric_output = model(**sample["net_input"])
 
-        classifier_logits_lowres, extra = metric_output
+        classifier_scores_lowres, extra = metric_output
+        if self.img_loss_type == 'mse':
+            penultimate = extra['penultimate']
+            assert self.init_seg_with_text and model.decoder.tie_seg_projection
+            with torch.no_grad():
+                projection_weight = model.decoder.seg_projection.weight.detach()
+            classifier_scores_lowres = -(penultimate @ projection_weight.T)
+            classifier_scores_lowres = classifier_scores_lowres.float()
 
         target_lowres = sample.get("downsampled_target")
         sample_masks_lowres = None # ignoring idx mask for "sample" dimension
 
-        classifier_logits_lowres = classifier_logits_lowres.float()
+        classifier_scores_lowres = classifier_scores_lowres.float()
         target_lowres_shape = target_lowres.shape
-        assert target_lowres_shape == classifier_logits_lowres.shape[:-1]
+        assert target_lowres_shape == classifier_scores_lowres.shape[:-1]
 
         sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+150))
         if self.ignore_eos:
@@ -456,9 +481,9 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         sample_masks = None
         constraint_masks = None
 
-        classifier_logits = self.upsample_logits(classifier_logits_lowres) # bilinear upsample
+        classifier_scores = self.upsample_logits(classifier_scores_lowres) # bilinear upsample
         target_shape = target.shape
-        assert target_shape == classifier_logits.shape[:-1]
+        assert target_shape == classifier_scores.shape[:-1]
 
         sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+150))
         if self.ignore_eos:
@@ -472,17 +497,24 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         ntokens = 1
         metrics = dict()
         with torch.no_grad():
-            classifier_logits_lowres = classifier_logits_lowres[~sample_masks_lowres]
-            classifier_logits = classifier_logits[~sample_masks]
-            metrics["nll_loss"] = F.cross_entropy(classifier_logits_lowres.detach(), target_lowres.detach()) # just for display
+            classifier_scores_lowres = classifier_scores_lowres[~sample_masks_lowres]
+            classifier_scores = classifier_scores[~sample_masks]
+            
+            if self.img_loss_type == 'ce':
+                metrics["nll_loss"] = F.cross_entropy(classifier_scores_lowres.detach(), target_lowres.detach()) # just for display
+            elif self.img_loss_type == 'mse':
+                projection_weight = model.decoder.seg_projection.weight.detach()
+                projection_lowres = projection_weight[target_lowres].float()
+                
+                metrics["mse_loss"] = F.mse_loss(penultimate[~sample_masks_lowres].detach(), projection_lowres.detach()) # just for display
 
-            area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_logits_lowres.detach(), target_lowres.detach())
+            area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_scores_lowres.detach(), target_lowres.detach())
             metrics["area_intersect_lowres"] = area_intersect_lowres
             metrics["area_pred_label_lowres"] = area_pred_label_lowres
             metrics["area_label_lowres"] = area_label_lowres
             metrics["area_union_lowres"] = area_union_lowres
 
-            area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_logits.detach(), target.detach())
+            area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_scores.detach(), target.detach())
             metrics["area_intersect"] = area_intersect
             metrics["area_pred_label"] = area_pred_label
             metrics["area_label"] = area_label
@@ -737,16 +769,30 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             target_lowres_img = target_lowres[~sample_masks_lowres_img]
             target_lowres_text = extra['encoder_returns']['image_embed_before_scale'][0][~sample_masks_lowres_text[:, :-1]].float()
 
+        if self.img_loss_type == 'ce':
             classifier_logits_lowres_img = classifier_logits_lowres[~sample_masks_lowres_img]
-            classifier_logits_lowres_text = penultimate_lowres[~sample_masks_lowres_text].float()
+            loss_img = F.cross_entropy(classifier_logits_lowres_img, target_lowres_img.detach(), label_smoothing=self.eps)
             
-        loss_img = F.cross_entropy(classifier_logits_lowres_img, target_lowres_img.detach(), label_smoothing=self.eps)
+        elif self.img_loss_type == 'mse':
+            assert self.init_seg_with_text and model.decoder.tie_seg_projection
+            penultimate_lowres_img = penultimate_lowres[~sample_masks_lowres_img].float()
+            with torch.no_grad():
+                projection_weight = model.decoder.seg_projection.weight.detach()
+                target_lowres_img = projection_weight[target_lowres_img].float()
 
+            loss_img = F.mse_loss(penultimate_lowres_img, target_lowres_img.detach())
+        
+        else:
+            raise NotImplementedError
+
+        # MSE for text loss
+        penultimate_lowres_text = penultimate_lowres[~sample_masks_lowres_text].float()
+        
         mean = target_lowres_text.mean(-1, keepdim=True)
         var = target_lowres_text.var(-1, keepdim=True)
         target_lowres_text = (target_lowres_text - mean) / (var + 1.e-6)**.5
-
-        loss_text = F.mse_loss(classifier_logits_lowres_text, target_lowres_text.detach())
+        
+        loss_text = F.mse_loss(penultimate_lowres_text, target_lowres_text.detach())
 
         return loss_img, loss_text
 

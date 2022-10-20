@@ -147,6 +147,12 @@ class SegCriterionV3Config(FairseqDataclass):
     mask_threshold_criterion: str = field(
         default='all', metadata={"help": "or | and | all"}
     )
+    labeled_loss_type: str = field(
+        default='ce', metadata={"help": "ce | mse"}
+    )
+    unlabeled_loss_type: str = field(
+        default='ce', metadata={"help": "ce | focal"}
+    )
     
 def resolve_str_true_false(x):
     x = x.lower()
@@ -259,6 +265,8 @@ class SegCriterionV3(FairseqCriterion):
         init_seg_with_text='true',
         mask_cosine_criterion='all',
         mask_threshold_criterion='all',
+        labeled_loss_type='ce',
+        unlabeled_loss_type='ce'
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -295,6 +303,9 @@ class SegCriterionV3(FairseqCriterion):
         
         self.unlabeled_target = unlabeled_target
         self.unlabeled_head_type = unlabeled_head_type
+        
+        self.labeled_loss_type = labeled_loss_type
+        self.unlabeled_loss_type = unlabeled_loss_type
         
         self.seg_id_offset = task.target_dictionary.index("<seg_0>")
         self.constraint_start = None
@@ -620,7 +631,11 @@ class SegCriterionV3(FairseqCriterion):
         
     def compute_labeled_loss(self, model, net_output, sample, update_num, reduce=True):
         # lprobs = model.get_normalized_probs(net_output, log_probs=False)
-        logits = net_output[0].float()
+        logits, extra = net_output
+        logits = logits.float()
+        
+        penultimate = extra['penultimate']
+        
         target = sample.get('text2seg_target')
 
         logits = logits[:, :-1]  # remove eos
@@ -641,14 +656,28 @@ class SegCriterionV3(FairseqCriterion):
         # if self.use_centering:
         #     self.update_center(logits)
 
-        lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+        if self.labeled_loss_type == 'ce':
+            lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+            loss, _, _ = label_smoothed_nll_loss(
+                lprobs,
+                target,
+                0.0,
+                update_num
+            )
+            
+        elif self.labeled_loss_type == 'mse':
+            assert self.init_seg_with_text and model.decoder.tie_seg_projection
+            penultimate = penultimate[:, :-1].reshape(-1, penultimate.size(-1))
+            penultimate = penultimate[mask].float()
+            with torch.no_grad():
+                projection_weight = model.decoder.seg_projection.weight.detach()
+                target = projection_weight[target].float()
 
-        loss, nll_loss, ntokens = label_smoothed_nll_loss(
-            lprobs,
-            target,
-            0.0,
-            update_num
-        )
+            loss = F.mse_loss(penultimate, target.detach())
+        
+        else:
+            raise NotImplementedError
+            
         return loss
 
     def compute_unlabled_kld_loss(self, model, net_output, sample, update_num, reduce=True, ema_model=None):
@@ -822,7 +851,13 @@ class SegCriterionV3(FairseqCriterion):
         else:
             logits_student = logits_student[:, :-1].reshape(-1, logits_student.size(-1))
 
-        unlabeled_loss = (F.cross_entropy(logits_student, teacher.detach(), label_smoothing=self.eps, reduction='none') * threshold_mask).mean()
+        if self.unlabeled_loss_type == 'ce':
+            unlabeled_loss = (F.cross_entropy(logits_student, teacher.detach(), reduction='none') * threshold_mask).mean()
+        elif self.unlabeled_loss_type == 'focal':
+            prob = logits_student.softmax(-1).max(-1)[0]
+            unlabeled_loss = (F.cross_entropy(logits_student, teacher.detach(), reduction='none') * threshold_mask * (1 - prob)**2).mean()
+        else:
+            raise NotImplementedError
         ntokens = 1
 
         metrics = dict()
