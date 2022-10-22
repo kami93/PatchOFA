@@ -893,56 +893,63 @@ class SegCriterionV3(FairseqCriterion):
         
         return unlabeled_loss, metrics, ntokens
 
-    def compute_loss(self, model, net_output, sample, update_num, reduce=True):
-        # lprobs, target, lprobs_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample)
-        # if constraint_masks is not None:
-        #     constraint_masks = constraint_masks[target != self.padding_idx]
-        
-        logits = net_output[0]
-        
-        logits, target, logits_lowres, target_lowres, constraint_masks = self.reshape_logits_and_target(model, logits, sample)
-        lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
-        lprobs_lowres = F.log_softmax(logits_lowres, dim=-1, dtype=torch.float32)
-        
-        bsz = sample['net_input']['patch_images'].size(0)
-        assert self.ignore_eos
-        
-        mask = torch.logical_and(target != self.padding_idx, target != (self.seg_id_offset+150))
-        lprobs = lprobs[mask]
-        target = target[mask]
-        target = target - self.seg_id_offset
-        
-        mask_lowres = torch.logical_and(target_lowres != self.padding_idx, target_lowres != (self.seg_id_offset+150))
-        lprobs_lowres = lprobs_lowres[mask_lowres]
-        target_lowres = target_lowres[mask_lowres]
-        target_lowres = target_lowres - self.seg_id_offset
-        
+    def compute_loss(self, model, net_output, sample, update_num, reduce=True, ema_model=None):
+        classifier_scores_lowres, extra = net_output
+
+        target_lowres = sample.get("downsampled_target")
+        sample_masks_lowres = None # ignoring idx mask for "sample" dimension
+
+        classifier_scores_lowres = classifier_scores_lowres.float()
+        target_lowres_shape = target_lowres.shape
+        assert target_lowres_shape == classifier_scores_lowres.shape[:-1]
+
+        sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+150))
+        eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
+        sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
+
+        # calculate upscaled versions
+        target = sample.get("target")
+        sample_masks = None
+
+        classifier_scores = self.upsample_logits(classifier_scores_lowres) # bilinear upsample
+        target_shape = target.shape
+        assert target_shape == classifier_scores.shape[:-1]
+
+        sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+150))
+        eos_masks = target.eq(self.task.tgt_dict.eos())
+        sample_masks = torch.logical_or(sample_masks, eos_masks)
+
+        # apply masking to targets
+        target_lowres = target_lowres[~sample_masks_lowres] - self.seg_id_offset
+        target = target[~sample_masks] - self.seg_id_offset
+
+        ntokens = 1
+
+        classifier_scores_lowres = classifier_scores_lowres[~sample_masks_lowres]
+        classifier_scores = classifier_scores[~sample_masks]
+
         if self.upscale_lprobs:
-            lprobs_train = lprobs
-            target_train = target
+            loss = F.cross_entropy(classifier_scores, target.detach(), label_smoothing=self.eps) # just for display
         else:
-            lprobs_train = lprobs_lowres
-            target_train = target_lowres
-                
-        loss, nll_loss, ntokens = label_smoothed_nll_loss(
-            lprobs_train,
-            target_train,
-            self.eps,
-            update_num,
-            reduce=reduce,
-            drop_worst_ratio=self.drop_worst_ratio,
-            drop_worst_after=self.drop_worst_after,
-            use_rdrop=self.use_rdrop,
-            reg_alpha=self.reg_alpha,
-            constraint_masks=constraint_masks,
-            constraint_start=self.constraint_start,
-            constraint_end=self.constraint_end
-        )
-        
-        area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(lprobs_lowres, target_lowres)
-        area_intersect, area_pred_label, area_label, area_union = self.compute_metric(lprobs, target)
-        
-        return loss, nll_loss, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
+            loss = F.cross_entropy(classifier_scores_lowres, target_lowres.detach(), label_smoothing=self.eps) # just for display
+
+        area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_scores_lowres.detach(), target_lowres.detach())
+        area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_scores.detach(), target.detach())
+
+        metrics = dict()
+        metrics["nll_loss"] = loss
+
+        metrics["area_intersect_lowres"] = area_intersect_lowres
+        metrics["area_pred_label_lowres"] = area_pred_label_lowres
+        metrics["area_label_lowres"] = area_label_lowres
+        metrics["area_union_lowres"] = area_union_lowres
+
+        metrics["area_intersect"] = area_intersect
+        metrics["area_pred_label"] = area_pred_label
+        metrics["area_label"] = area_label
+        metrics["area_union"] = area_union
+
+        return loss, metrics, ntokens
 
     def compute_metric(self, lprobs, target):
         num_classes = lprobs.size(-1)
