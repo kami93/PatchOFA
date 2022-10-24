@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
-CLASSES = np.array([
+CLASSES_ADE = np.array([
     'wall', 'building', 'sky', 'floor', 'tree', 'ceiling', 'road', 'bed',
     'windowpane', 'grass', 'cabinet', 'sidewalk', 'person', 'earth',
     'door', 'table', 'mountain', 'plant', 'curtain', 'chair', 'car',
@@ -61,31 +61,44 @@ CLASSES = np.array([
     'plate', 'monitor', 'bulletin board', 'shower', 'radiator', 'glass',
     'clock', 'flag', 'unknown'])
 
-# CLASSES2 = np.array([
-#     'barrier', 'construction', 'azure', 'ground', 'wood', 'roof', 'avenue', 'mattress',
-#     'windowframe', 'meadow', 'cabinet', 'sidewalk', 'person', 'earth',
-#     'door', 'table', 'mountain', 'plant', 'curtain', 'chair', 'car',
-#     'water', 'painting', 'sofa', 'shelf', 'house', 'sea', 'mirror', 'rug',
-#     'field', 'armchair', 'seat', 'fence', 'desk', 'rock', 'wardrobe',
-#     'lamp', 'bathtub', 'railing', 'cushion', 'base', 'box', 'column',
-#     'signboard', 'chest of drawers', 'counter', 'sand', 'sink',
-#     'skyscraper', 'fireplace', 'refrigerator', 'grandstand', 'path',
-#     'stairs', 'runway', 'case', 'pool table', 'pillow', 'screen door',
-#     'stairway', 'river', 'bridge', 'bookcase', 'blind', 'coffee table',
-#     'toilet', 'flower', 'book', 'hill', 'bench', 'countertop', 'stove',
-#     'palm', 'kitchen island', 'computer', 'swivel chair', 'boat', 'bar',
-#     'arcade machine', 'hovel', 'bus', 'towel', 'light', 'truck', 'tower',
-#     'chandelier', 'awning', 'streetlight', 'booth', 'television receiver',
-#     'airplane', 'dirt track', 'apparel', 'pole', 'land', 'bannister',
-#     'escalator', 'ottoman', 'bottle', 'buffet', 'poster', 'stage', 'van',
-#     'ship', 'fountain', 'conveyer belt', 'canopy', 'washer', 'plaything',
-#     'swimming pool', 'stool', 'barrel', 'basket', 'waterfall', 'tent',
-#     'bag', 'minibike', 'cradle', 'oven', 'ball', 'food', 'step', 'tank',
-#     'trade name', 'microwave', 'pot', 'animal', 'bicycle', 'lake',
-#     'dishwasher', 'screen', 'blanket', 'sculpture', 'hood', 'sconce',
-#     'vase', 'traffic light', 'tray', 'ashcan', 'fan', 'pier', 'crt screen',
-#     'plate', 'monitor', 'bulletin board', 'shower', 'radiator', 'glass',
-#     'clock', 'flag', 'unknown'])
+CLASSES_COCOF = np.array([
+    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train',
+    'truck', 'boat', 'traffic light', 'fire hydrant', 'stop sign',
+    'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep',
+    'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella',
+    'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard',
+    'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard',
+    'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 'fork',
+    'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange',
+    'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair',
+    'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv',
+    'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave',
+    'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase',
+    'scissors', 'teddy bear', 'hair drier', 'toothbrush', 'banner',
+    'blanket', 'branch', 'bridge', 'building-other', 'bush', 'cabinet',
+    'cage', 'cardboard', 'carpet', 'ceiling-other', 'ceiling-tile',
+    'cloth', 'clothes', 'clouds', 'counter', 'cupboard', 'curtain',
+    'desk-stuff', 'dirt', 'door-stuff', 'fence', 'floor-marble',
+    'floor-other', 'floor-stone', 'floor-tile', 'floor-wood',
+    'flower', 'fog', 'food-other', 'fruit', 'furniture-other', 'grass',
+    'gravel', 'ground-other', 'hill', 'house', 'leaves', 'light', 'mat',
+    'metal', 'mirror-stuff', 'moss', 'mountain', 'mud', 'napkin', 'net',
+    'paper', 'pavement', 'pillow', 'plant-other', 'plastic', 'platform',
+    'playingfield', 'railing', 'railroad', 'river', 'road', 'rock', 'roof',
+    'rug', 'salad', 'sand', 'sea', 'shelf', 'sky-other', 'skyscraper',
+    'snow', 'solid-other', 'stairs', 'stone', 'straw', 'structural-other',
+    'table', 'tent', 'textile-other', 'towel', 'tree', 'vegetable',
+    'wall-brick', 'wall-concrete', 'wall-other', 'wall-panel',
+    'wall-stone', 'wall-tile', 'wall-wood', 'water-other', 'waterdrops',
+    'window-blind', 'window-other', 'wood', 'unknown'])
+
+CLASSES_COCOC = np.array([
+    'electronic', 'appliance', 'food-things', 'furniture-things', 'indoor', 
+    'kitchen', 'accessory', 'animal', 'outdoor', 'person', 
+    'sports', 'vehicle', 'ceiling', 'floor', 'food-stuff', 
+    'furniture-stuff', 'raw material', 'textile', 'wall', 'window', 
+    'building', 'ground', 'plant', 'sky', 'solid', 
+    'structural', 'water', 'unknown'])
 
 def collate(samples, pad_idx, eos_idx):
     if len(samples) == 0:
@@ -183,7 +196,6 @@ def collate(samples, pad_idx, eos_idx):
 
     return batch
 
-
 class SegmentationDataset(OFADataset):
     def __init__(
         self,
@@ -238,20 +250,25 @@ class SegmentationDataset(OFADataset):
             self.downsample_gt_seg = transforms.Resize(32, transforms.InterpolationMode.NEAREST)
             
         self.prompt = self.encode_text(' what is the segmentation of the image?')
-        
-        self.id2seg = np.array([f'<seg_{idx}>' for idx in range(151)])
-        self.seg2code = self.encode_text(" ".join(self.id2seg), use_bpe=False)
-
         self.pos_tgt_item = self.encode_text(" yes")
         self.neg_tgt_item = self.encode_text(" no")
-        
-        self.id2text = [self.encode_text(f" {x}") for x in CLASSES]
-        self.text_length = torch.tensor([len(x) for x in self.id2text])
         
         self.fakeimage_type = cfg.fakeimage_type
         self.prompt_type = cfg.prompt_type
         self.fakeimage_prompt_type = cfg.fakeimage_prompt_type
-        
+        self.num_seg = cfg.num_seg_tokens # 150 (ade) 171 (coco-fine) 27 (coco-coarse)
+        if self.num_seg == 171:
+            self.id2text = [self.encode_text(f" {x}") for x in CLASSES_COCOF]
+        elif self.num_seg == 27:
+            self.id2text = [self.encode_text(f" {x}") for x in CLASSES_COCOC]
+        elif self.num_seg == 150:
+            self.id2text = [self.encode_text(f" {x}") for x in CLASSES_ADE]
+        else:
+            raise NotImplementedError
+        self.text_length = torch.tensor([len(x) for x in self.id2text])
+
+        self.id2seg = np.array([f'<seg_{idx}>' for idx in range(self.num_seg + 1)])
+        self.seg2code = self.encode_text(" ".join(self.id2seg), use_bpe=False)
 
     def encode_text(self, text, length=None, append_bos=False, append_eos=False, use_bpe=True):
         line = [self.bpe.encode(' {}'.format(word.strip())) if not word.startswith('<seg_') else word for word in text.strip().split()]
@@ -303,7 +320,7 @@ class SegmentationDataset(OFADataset):
         # avoid using underflow conversion
         segmentation_arr[segmentation_arr == 0] = 255
         segmentation_arr = segmentation_arr - 1
-        segmentation_arr[segmentation_arr == 254] = 150
+        segmentation_arr[segmentation_arr == 254] = self.num_seg
         results['gt_semantic_seg'] = segmentation_arr
         results['seg_fields'] = ['gt_semantic_seg']
 
@@ -370,7 +387,7 @@ class SegmentationDataset(OFADataset):
                 
             else:
                 # self.prompt_type is 'all' during validation.
-                src_text = torch.cat([self.id2text[idx] for idx in range(150)])
+                src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
                 src_item = torch.cat([self.bos_item, src_text, self.eos_item])
         
         elif self.prompt_type == 'prompt':
@@ -378,25 +395,25 @@ class SegmentationDataset(OFADataset):
         
         elif self.prompt_type == 'random_20':
             if self.split == 'train':
-                rand_idx = np.random.choice(150, size=20)
+                rand_idx = np.random.choice(self.num_seg, size=20)
                 src_text = torch.cat([self.id2text[idx] for idx in rand_idx])
                 src_item = torch.cat([self.bos_item, src_text, self.eos_item]) # src_item is the student (strong aug.)
                 
                 # rand_idx = np.random.choice(150, size=20)
-                src_text = torch.cat([self.id2text[idx] for idx in range(150)])
+                src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
                 src_item_2 = torch.cat([self.bos_item, src_text, self.eos_item]) # src_item_2 is the teacher (weak aug.)
             
             else:
                 # self.prompt_type is 'all' during validation.
-                src_text = torch.cat([self.id2text[idx] for idx in range(150)])
+                src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
                 src_item = torch.cat([self.bos_item, src_text, self.eos_item])
             
         elif self.prompt_type == 'all':
-            src_text = torch.cat([self.id2text[idx] for idx in range(150)])
+            src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
             src_item = torch.cat([self.bos_item, src_text, self.eos_item])
 
         elif self.prompt_type == 'seg':
-            src_text = self.seg2code[:150]
+            src_text = self.seg2code[:self.num_seg]
             src_item = torch.cat([self.bos_item, src_text, self.eos_item])
 
         else:
@@ -436,7 +453,7 @@ class SegmentationDataset(OFADataset):
                 code = self.seg2code[gt_semantic_seg_downsampled]
                 
             elif self.fakeimage_type == 'random':
-                rand = np.random.choice(150, size=1024, replace=True)
+                rand = np.random.choice(self.num_seg, size=1024, replace=True)
                 text_list = torch.cat([self.id2text[idx] for idx in rand])
                 text_length = torch.tensor([self.text_length[idx] for idx in rand], dtype=torch.long)
                 code = self.seg2code[rand]
@@ -445,7 +462,7 @@ class SegmentationDataset(OFADataset):
                 raise NotImplementedError
 
             if self.fakeimage_prompt_type == 'all':
-                src_text = torch.cat([self.id2text[idx] for idx in range(150)])
+                src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
                 src_item = torch.cat([self.bos_item, src_text, self.eos_item])
 
             elif self.fakeimage_prompt_type == 'gt_seg':

@@ -29,7 +29,8 @@ from omegaconf import II
 import logging
 logger = logging.getLogger(__name__)
 
-CLASSES = np.array([
+
+CLASSES_ADE = np.array([
     'wall', 'building', 'sky', 'floor', 'tree', 'ceiling', 'road', 'bed ',
     'windowpane', 'grass', 'cabinet', 'sidewalk', 'person', 'earth',
     'door', 'table', 'mountain', 'plant', 'curtain', 'chair', 'car',
@@ -54,6 +55,45 @@ CLASSES = np.array([
     'vase', 'traffic light', 'tray', 'ashcan', 'fan', 'pier', 'crt screen',
     'plate', 'monitor', 'bulletin board', 'shower', 'radiator', 'glass',
     'clock', 'flag'])
+
+CLASSES_COCOF = np.array([
+    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train',
+    'truck', 'boat', 'traffic light', 'fire hydrant', 'stop sign',
+    'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep',
+    'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella',
+    'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard',
+    'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard',
+    'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 'fork',
+    'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange',
+    'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair',
+    'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv',
+    'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave',
+    'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase',
+    'scissors', 'teddy bear', 'hair drier', 'toothbrush', 'banner',
+    'blanket', 'branch', 'bridge', 'building-other', 'bush', 'cabinet',
+    'cage', 'cardboard', 'carpet', 'ceiling-other', 'ceiling-tile',
+    'cloth', 'clothes', 'clouds', 'counter', 'cupboard', 'curtain',
+    'desk-stuff', 'dirt', 'door-stuff', 'fence', 'floor-marble',
+    'floor-other', 'floor-stone', 'floor-tile', 'floor-wood',
+    'flower', 'fog', 'food-other', 'fruit', 'furniture-other', 'grass',
+    'gravel', 'ground-other', 'hill', 'house', 'leaves', 'light', 'mat',
+    'metal', 'mirror-stuff', 'moss', 'mountain', 'mud', 'napkin', 'net',
+    'paper', 'pavement', 'pillow', 'plant-other', 'plastic', 'platform',
+    'playingfield', 'railing', 'railroad', 'river', 'road', 'rock', 'roof',
+    'rug', 'salad', 'sand', 'sea', 'shelf', 'sky-other', 'skyscraper',
+    'snow', 'solid-other', 'stairs', 'stone', 'straw', 'structural-other',
+    'table', 'tent', 'textile-other', 'towel', 'tree', 'vegetable',
+    'wall-brick', 'wall-concrete', 'wall-other', 'wall-panel',
+    'wall-stone', 'wall-tile', 'wall-wood', 'water-other', 'waterdrops',
+    'window-blind', 'window-other', 'wood'])
+
+CLASSES_COCOC = np.array([
+    'electronic', 'appliance', 'food-things', 'furniture-things', 'indoor', 
+    'kitchen', 'accessory', 'animal', 'outdoor', 'person', 
+    'sports', 'vehicle', 'ceiling', 'floor', 'food-stuff', 
+    'furniture-stuff', 'raw material', 'textile', 'wall', 'window', 
+    'building', 'ground', 'plant', 'sky', 'solid', 
+    'structural', 'water'])
 
 @dataclass
 class SegSemiCriterionConfig(FairseqDataclass):
@@ -316,10 +356,10 @@ class SegSemiCriterion(FairseqCriterion):
         
         if self.unlabeled_head_type == 'shared':
             # assert self.student_temperature == 1.0
-            output_classes = 150
+            self.output_classes = task.cfg.num_seg_tokens
         elif self.unlabeled_head_type == 'separate':
-            output_classes = 8192
-            self.unlabeled_head = DINOHead(in_dim=256, out_dim=output_classes, use_bn=False, nlayers=3, hidden_dim=2048, bottleneck_dim=256)
+            self.output_classes = 8192
+            self.unlabeled_head = DINOHead(in_dim=256, out_dim=self.output_classes, use_bn=False, nlayers=3, hidden_dim=2048, bottleneck_dim=256)
         else:
             raise NotImplementedError
         
@@ -329,10 +369,10 @@ class SegSemiCriterion(FairseqCriterion):
                 label_avg = torch.tensor(pkl.load(f)).unsqueeze(0)
                 self.register_buffer("label_avg", label_avg, persistent=False) # self.label_avg
             self.unlabel_avg = []
-        
+
         if self.use_centering:
-            self.register_buffer("center", torch.zeros(size=(1, output_classes))) # self.center
-            self.register_buffer("center_accumulation", torch.zeros(size=(1, output_classes)), persistent=False) # tmp buffer for accumulated updates. # self.center_accumulation
+            self.register_buffer("center", torch.zeros(size=(1, self.output_classes))) # self.center
+            self.register_buffer("center_accumulation", torch.zeros(size=(1, self.output_classes)), persistent=False) # tmp buffer for accumulated updates. # self.center_accumulation
             self.center_momentum = 0.9
             self.register_buffer("center_batch_size", torch.zeros(size=(1, )), persistent=False) # tmp buffer for accumulated updates. # self.center_batch_size
 
@@ -361,6 +401,15 @@ class SegSemiCriterion(FairseqCriterion):
                 ).long()
                 return s
             
+            if self.output_classes == 150:
+                CLASSES = CLASSES_ADE
+            elif self.output_classes == 171:
+                CLASSES = CLASSES_COCOF
+            elif self.output_classes == 27:
+                CLASSES = CLASSES_COCOC
+            else:
+                raise NotImplementedError
+
             with torch.no_grad():
                 id2text = [encode_text(f" {x}") for x in CLASSES]
                 id2text_tokens = torch.cat(id2text).cuda()
@@ -465,13 +514,12 @@ class SegSemiCriterion(FairseqCriterion):
             logging_output["abs_center_max"] = abs_center.max()
             logging_output["abs_center_mean"] = abs_center.mean()
         
-        if self.report_accuracy:
-            n_correct, total = self.compute_accuracy(model, net_output, sample)
-            logging_output["n_correct"] = utils.item(n_correct.data)
-            logging_output["total"] = utils.item(total.data)
+        # if self.report_accuracy:
+        #     n_correct, total = self.compute_accuracy(model, net_output, sample)
+        #     logging_output["n_correct"] = utils.item(n_correct.data)
+        #     logging_output["total"] = utils.item(total.data)
         return loss, sample_size, logging_output
 
-    
     def upsample_logits(self, logits):
         logits_ = logits[:, :-1]
         logits_ = rearrange(logits_, 'b (h w) d -> b d h w', h=32, w=32)
@@ -480,163 +528,6 @@ class SegSemiCriterion(FairseqCriterion):
         logits = torch.cat([logits_, logits[:, -1:]], dim=1)
         
         return logits
-    
-    def reshape_logits_and_target(self, model, logits, sample, alt_logits=None):
-        conf = sample['conf'][:, None, None] if 'conf' in sample and sample['conf'] is not None else 1
-        constraint_masks = None
-        # if "constraint_masks" in sample and sample["constraint_masks"] is not None:
-        #     constraint_masks = sample["constraint_masks"]
-        #     logits.masked_fill_(~constraint_masks, -math.inf)
-        #     if alt_logits is not None:
-        #         alt_logits.masked_fill_(~constraint_masks, -math.inf)
-            
-        # if self.constraint_start is not None and self.constraint_end is not None:
-        #     logits[:, :, 4:self.constraint_start] = -math.inf
-        #     logits[:, :, self.constraint_end:] = -math.inf
-        #     if alt_logits is not None:
-        #         logits[:, :, 4:self.constraint_start] = -math.inf
-        #         logits[:, :, self.constraint_end:] = -math.inf
-        # lprobs = model.get_normalized_probs(net_output, log_probs=True) * conf
-
-        # if self.ignore_prefix_size > 0:
-        #     lprobs = lprobs[:, self.ignore_prefix_size :, :].contiguous()
-        #     target = target[:, self.ignore_prefix_size :].contiguous()
-            
-        #     if constraint_masks is not None:
-        #         constraint_masks = constraint_masks[:, self.ignore_prefix_size :, :].contiguous()
-
-        logits_lowres = logits.float()
-        if self.upscale_lprobs:
-            logits = self.upsample_logits(logits_lowres)
-            
-        target_lowres = sample["downsampled_target"]
-        target = sample["target"]
-        
-        if self.ignore_eos:
-            bsz, seq_len = target_lowres.size()
-            eos_indices_lowres = target_lowres.eq(self.task.tgt_dict.eos())
-            target_lowres = target_lowres[~eos_indices_lowres].reshape(bsz, seq_len-1)
-            logits_lowres = logits_lowres[~eos_indices_lowres].reshape(bsz, seq_len-1, logits_lowres.size(-1))
-            
-            bsz, seq_len = target.size()
-            eos_indices = target.eq(self.task.tgt_dict.eos())
-            target = target[~eos_indices].reshape(bsz, seq_len-1)
-            if self.upscale_lprobs:
-                logits = logits[~eos_indices].reshape(bsz, seq_len-1, logits.size(-1))
-
-        # bsz, seq_len = target_lowres.size()
-        # class_mask = torch.zeros([bsz, 151], dtype=torch.bool, device=logits_lowres.device)
-        # class_target = target_lowres - self.seg_id_offset
-        # class_mask[torch.arange(bsz).unsqueeze(-1).expand(-1, seq_len), class_target] = True
-        # class_mask = class_mask[:, :150]
-        # class_mask = class_mask.unsqueeze(1).expand(-1, seq_len, -1)
-
-        if self.upscale_lprobs:
-            logits = logits.reshape(-1, logits.size(-1))
-        logits_lowres = logits_lowres.reshape(-1, logits_lowres.size(-1))
-        
-        target = target.reshape(-1)
-        target_lowres = target_lowres.reshape(-1)
-
-        # class_mask = class_mask.reshape(-1, 150)
-     
-        mask = torch.logical_and(target != self.padding_idx, target != (self.seg_id_offset+150))
-        if self.upscale_lprobs:
-            logits = logits[mask]
-        target = target[mask]
-        target = target - self.seg_id_offset
-        
-        mask_lowres = torch.logical_and(target_lowres != self.padding_idx, target_lowres != (self.seg_id_offset+150))
-        logits_lowres = logits_lowres[mask_lowres]
-        target_lowres = target_lowres[mask_lowres]
-        target_lowres = target_lowres - self.seg_id_offset
-        
-        # class_mask = class_mask[mask_lowres]
-        # constraint_masks = ~class_mask
-
-        if self.upscale_lprobs:
-            logits = [logits, logits_lowres]
-        else:
-            logits = [logits_lowres, logits_lowres]
-        target = [target, target_lowres]
-
-        if alt_logits is not None:
-            alt_logits_lowres = alt_logits = alt_logits.float()
-            alt_logits = self.upsample_logits(alt_logits)
-            if self.ignore_eos:
-                bsz, seq_len, embed_dim = alt_logits_lowres.size()
-                alt_logits_lowres = alt_logits_lowres[~eos_indices_lowres].reshape(bsz, seq_len-1, embed_dim)
-                
-                bsz, seq_len, embed_dim = alt_logits.size()
-                alt_logits = alt_logits[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
-
-            alt_logits = alt_logits.reshape(-1, alt_logits.size(-1))
-            alt_logits_lowres = alt_logits_lowres.reshape(-1, alt_logits_lowres.size(-1))
-
-            alt_logits_lowres = alt_logits_lowres[mask_lowres]
-            alt_logits = alt_logits[mask]
-            
-            alt_logits = [alt_logits, alt_logits_lowres]
-
-            return logits, target, constraint_masks, alt_logits
-        
-        return logits, target, constraint_masks
-
-    def get_lprobs_and_target(self, model, net_output, sample, return_logit=False):
-        conf = sample['conf'][:, None, None] if 'conf' in sample and sample['conf'] is not None else 1
-        constraint_masks = None
-        if "constraint_masks" in sample and sample["constraint_masks"] is not None:
-            constraint_masks = sample["constraint_masks"]
-            net_output[0].masked_fill_(~constraint_masks, -math.inf)
-        if self.constraint_start is not None and self.constraint_end is not None:
-            net_output[0][:, :, 4:self.constraint_start] = -math.inf
-            net_output[0][:, :, self.constraint_end:] = -math.inf
-        # lprobs = model.get_normalized_probs(net_output, log_probs=True) * conf
-        
-        logits = net_output[0].float()
-        logits_lowres = logits
-        
-        logits_ = logits[:, :-1]
-        logits_ = rearrange(logits_, 'b (h w) d -> b d h w', h=32, w=32)
-        logits_ = resize(logits_, size=(512, 512), mode='bilinear', align_corners=False)
-        logits_ = rearrange(logits_, 'b d h w -> b (h w) d')
-        logits = torch.cat([logits_, logits[:, -1:]], dim=1)
-
-        target_lowres = sample["downsampled_target"]
-        target = sample["target"]
-        
-        # if self.ignore_prefix_size > 0:
-        #     lprobs = lprobs[:, self.ignore_prefix_size :, :].contiguous()
-        #     target = target[:, self.ignore_prefix_size :].contiguous()
-            
-        #     if constraint_masks is not None:
-        #         constraint_masks = constraint_masks[:, self.ignore_prefix_size :, :].contiguous()
-                
-        if self.ignore_eos:
-            bsz, seq_len, embed_dim = logits_lowres.size()
-            eos_indices = target_lowres.eq(self.task.tgt_dict.eos())
-            logits_lowres = logits_lowres[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
-            target_lowres = target_lowres[~eos_indices].reshape(bsz, seq_len-1)
-
-            bsz, seq_len, embed_dim = logits.size()
-            eos_indices = target.eq(self.task.tgt_dict.eos())
-            logits = logits[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
-            target = target[~eos_indices].reshape(bsz, seq_len-1)
-
-        if return_logit:
-            lprobs = logits
-            lprobs_lowres = logits_lowres
-        else:
-            lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
-            lprobs_lowres = F.log_softmax(logits_lowres, dim=-1, dtype=torch.float32)
-
-        #     if constraint_masks is not None:
-        #         constraint_masks = constraint_masks[~eos_indices].reshape(bsz, seq_len-1, embed_dim)
-
-        # if constraint_masks is not None:
-        #     constraint_masks = constraint_masks.view(-1, constraint_masks.size(-1))
-            
-        return lprobs.view(-1, lprobs.size(-1)), target.view(-1), lprobs_lowres.view(-1, lprobs_lowres.size(-1)), target_lowres.view(-1), constraint_masks
         
     def compute_labeled_loss(self, model, net_output, sample, update_num, reduce=True):
         classifier_logits_lowres, extra = net_output
@@ -648,7 +539,7 @@ class SegSemiCriterion(FairseqCriterion):
             target_shape = target.shape
             assert target_shape == classifier_logits.shape[:-1]
 
-            sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+150))
+            sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+self.output_classes))
             if self.ignore_eos:
                 eos_masks = target.eq(self.task.tgt_dict.eos())
                 sample_masks = torch.logical_or(sample_masks, eos_masks)
@@ -664,7 +555,7 @@ class SegSemiCriterion(FairseqCriterion):
             target_lowres_shape = target_lowres.shape
             assert target_lowres_shape == classifier_logits_lowres.shape[:-1]
 
-            sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+150))
+            sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+self.output_classes))
             if self.ignore_eos:
                 eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
                 sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
@@ -691,7 +582,7 @@ class SegSemiCriterion(FairseqCriterion):
         target_lowres_shape = target_lowres.shape
         assert target_lowres_shape == classifier_logits_lowres.shape[:-1]
 
-        sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+150))
+        sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+self.output_classes))
         if self.ignore_eos:
             eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
             sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
@@ -706,7 +597,7 @@ class SegSemiCriterion(FairseqCriterion):
         target_shape = target.shape
         assert target_shape == classifier_logits.shape[:-1]
 
-        sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+150))
+        sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+self.output_classes))
         if self.ignore_eos:
             eos_masks = target.eq(self.task.tgt_dict.eos())
             sample_masks = torch.logical_or(sample_masks, eos_masks)
@@ -905,56 +796,63 @@ class SegSemiCriterion(FairseqCriterion):
         
         return unlabeled_loss, metrics, ntokens
 
-    def compute_loss(self, model, net_output, sample, update_num, reduce=True):
-        # lprobs, target, lprobs_lowres, target_lowres, constraint_masks = self.get_lprobs_and_target(model, net_output, sample)
-        # if constraint_masks is not None:
-        #     constraint_masks = constraint_masks[target != self.padding_idx]
-        
-        logits = net_output[0]
-        
-        logits, target, logits_lowres, target_lowres, constraint_masks = self.reshape_logits_and_target(model, logits, sample)
-        lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
-        lprobs_lowres = F.log_softmax(logits_lowres, dim=-1, dtype=torch.float32)
-        
-        bsz = sample['net_input']['patch_images'].size(0)
-        assert self.ignore_eos
-        
-        mask = torch.logical_and(target != self.padding_idx, target != (self.seg_id_offset+150))
-        lprobs = lprobs[mask]
-        target = target[mask]
-        target = target - self.seg_id_offset
-        
-        mask_lowres = torch.logical_and(target_lowres != self.padding_idx, target_lowres != (self.seg_id_offset+150))
-        lprobs_lowres = lprobs_lowres[mask_lowres]
-        target_lowres = target_lowres[mask_lowres]
-        target_lowres = target_lowres - self.seg_id_offset
-        
+    def compute_loss(self, model, net_output, sample, update_num, reduce=True, ema_model=None):
+        classifier_scores_lowres, extra = net_output
+
+        target_lowres = sample.get("downsampled_target")
+        sample_masks_lowres = None # ignoring idx mask for "sample" dimension
+
+        classifier_scores_lowres = classifier_scores_lowres.float()
+        target_lowres_shape = target_lowres.shape
+        assert target_lowres_shape == classifier_scores_lowres.shape[:-1]
+
+        sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+self.output_classes))
+        eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
+        sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
+
+        # calculate upscaled versions
+        target = sample.get("target")
+        sample_masks = None
+
+        classifier_scores = self.upsample_logits(classifier_scores_lowres) # bilinear upsample
+        target_shape = target.shape
+        assert target_shape == classifier_scores.shape[:-1]
+
+        sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+self.output_classes))
+        eos_masks = target.eq(self.task.tgt_dict.eos())
+        sample_masks = torch.logical_or(sample_masks, eos_masks)
+
+        # apply masking to targets
+        target_lowres = target_lowres[~sample_masks_lowres] - self.seg_id_offset
+        target = target[~sample_masks] - self.seg_id_offset
+
+        ntokens = 1
+
+        classifier_scores_lowres = classifier_scores_lowres[~sample_masks_lowres]
+        classifier_scores = classifier_scores[~sample_masks]
+
         if self.upscale_lprobs:
-            lprobs_train = lprobs
-            target_train = target
+            loss = F.cross_entropy(classifier_scores, target.detach(), label_smoothing=self.eps) # just for display
         else:
-            lprobs_train = lprobs_lowres
-            target_train = target_lowres
-                
-        loss, nll_loss, ntokens = label_smoothed_nll_loss(
-            lprobs_train,
-            target_train,
-            self.eps,
-            update_num,
-            reduce=reduce,
-            drop_worst_ratio=self.drop_worst_ratio,
-            drop_worst_after=self.drop_worst_after,
-            use_rdrop=self.use_rdrop,
-            reg_alpha=self.reg_alpha,
-            constraint_masks=constraint_masks,
-            constraint_start=self.constraint_start,
-            constraint_end=self.constraint_end
-        )
-        
-        area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(lprobs_lowres, target_lowres)
-        area_intersect, area_pred_label, area_label, area_union = self.compute_metric(lprobs, target)
-        
-        return loss, nll_loss, ntokens, area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres, area_intersect, area_pred_label, area_label, area_union
+            loss = F.cross_entropy(classifier_scores_lowres, target_lowres.detach(), label_smoothing=self.eps) # just for display
+
+        area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_scores_lowres.detach(), target_lowres.detach())
+        area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_scores.detach(), target.detach())
+
+        metrics = dict()
+        metrics["nll_loss"] = loss
+
+        metrics["area_intersect_lowres"] = area_intersect_lowres
+        metrics["area_pred_label_lowres"] = area_pred_label_lowres
+        metrics["area_label_lowres"] = area_label_lowres
+        metrics["area_union_lowres"] = area_union_lowres
+
+        metrics["area_intersect"] = area_intersect
+        metrics["area_pred_label"] = area_pred_label
+        metrics["area_label"] = area_label
+        metrics["area_union"] = area_union
+
+        return loss, metrics, ntokens
 
     def compute_metric(self, lprobs, target):
         num_classes = lprobs.size(-1)
