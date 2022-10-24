@@ -92,6 +92,11 @@ class SegmentationSemiConfig(OFAConfig):
     labeled_num_samples: int = field(
         default=2000
     )
+    num_seg_tokens: int = field(
+        default=150,
+        metadata={"help": "number of seg tokens"},
+    )
+
 
 @register_task("segmentation_semi", dataclass=SegmentationSemiConfig)
 class SegmentationSemiTask(OFATask):
@@ -99,6 +104,7 @@ class SegmentationSemiTask(OFATask):
         super().__init__(cfg, src_dict, tgt_dict)
 
         self.uses_ema = self.cfg.uses_ema
+        self.num_seg_tokens = cfg.num_seg_tokens
 
     @classmethod
     def setup_task(cls, cfg: DictConfig, **kwargs):
@@ -120,7 +126,7 @@ class SegmentationSemiTask(OFATask):
             src_dict.add_symbol("<bin_{}>".format(i))
             tgt_dict.add_symbol("<bin_{}>".format(i))
 
-        num_segs = 151
+        num_segs = cfg.num_seg_tokens + 1
         for i in range(num_segs):
             src_dict.add_symbol("<seg_{}>".format(i))
             tgt_dict.add_symbol("<seg_{}>".format(i))
@@ -139,7 +145,7 @@ class SegmentationSemiTask(OFATask):
         else:
             table_path = paths[-1]
         
-        assert self.cfg.selected_cols == '0,1,2'
+        # assert self.cfg.selected_cols == '0,1,2'
         dataset = FileDataset(table_path, self.cfg.selected_cols)
         
         if split == 'train':
