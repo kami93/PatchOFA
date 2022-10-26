@@ -254,6 +254,11 @@ class TransformerEncoder(FairseqEncoder):
         
         self.no_grad_image = resolve_str_true_false(args.no_grad_image)
 
+        if args.freeze_encoder:
+            logger.info("Freezing all Encoder parameters...")
+            for param in self.parameters():
+                param.requires_grad_(False)
+
     def build_encoder_layer(self, args, drop_path_rate=0.0):
         layer = TransformerEncoderLayer(args, drop_path_rate=drop_path_rate, \
             use_adapter=getattr(args, "adapter", False), adapter_dim=getattr(args, "adapter_dim", 200))
