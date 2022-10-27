@@ -461,7 +461,7 @@ class SegCriterionV3(FairseqCriterion):
         if self.use_rdrop:
             construct_rdrop_sample(sample)
         
-        if self.alpha != 1.0:
+        if self.alpha != 1.0 and model.training:
             net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment, aux_input=sample["aux_input"])
             labeled_output = net_output[1].get("aux_output")
             labeled_loss = self.compute_labeled_loss(model, labeled_output, sample, update_num, reduce=reduce)

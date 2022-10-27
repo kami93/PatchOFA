@@ -253,11 +253,12 @@ class TransformerEncoder(FairseqEncoder):
         self.entangle_position_embedding = args.entangle_position_embedding
         
         self.no_grad_image = resolve_str_true_false(args.no_grad_image)
+        self.freeze_encoder = resolve_str_true_false(args.freeze_encoder)
 
-        # if args.freeze_encoder:
-        #     logger.info("Freezing all Encoder parameters...")
-        #     for param in self.parameters():
-        #         param.requires_grad_(False)
+        if self.freeze_encoder:
+            logger.info("Freezing all Encoder parameters...")
+            for param in self.parameters():
+                param.requires_grad_(False)
 
     def build_encoder_layer(self, args, drop_path_rate=0.0):
         layer = TransformerEncoderLayer(args, drop_path_rate=drop_path_rate, \

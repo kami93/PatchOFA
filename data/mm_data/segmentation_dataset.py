@@ -457,7 +457,17 @@ class SegmentationDataset(OFADataset):
                 text_list = torch.cat([self.id2text[idx] for idx in rand])
                 text_length = torch.tensor([self.text_length[idx] for idx in rand], dtype=torch.long)
                 code = self.seg2code[rand]
-            
+
+            elif self.fakeimage_type == 'upsampling':
+                sh, sw = torch.randint(4,16,(2,))
+                sh, sw = sh.item(), sw.item()
+                rand = np.random.choice(self.num_seg, size=sh*sw, replace=True)
+                rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
+                rand = self.downsample_gt_seg(rand).reshape(-1)
+                text_list = torch.cat([self.id2text[idx] for idx in rand])
+                text_length = torch.tensor([self.text_length[idx] for idx in rand], dtype=torch.long)
+                code = self.seg2code[rand]
+                    
             else:
                 raise NotImplementedError
 
