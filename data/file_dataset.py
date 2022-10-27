@@ -8,6 +8,7 @@ import torch
 import pickle
 import logging
 import time
+from pathlib import Path
 
 import torch.distributed as dist
 
@@ -53,12 +54,16 @@ class FileDataset:
         if self.cached_index:
             cache_path = "{}.index".format(self.file_path)
             while not os.path.exists(cache_path):
-                if is_master_process:
+                working_flag = Path(f"{cache_path}.working")
+                if is_master_process and not working_flag.exists():
+                    working_flag.touch()
                     logger.info(f"index cache file {cache_path} not exists!")
                     logger.info(f"initializing a new one...")
+                    
                     self._sweep_datafile()
                     with open(cache_path, "wb") as fp:
                         pickle.dump([self.total_row_count, self.lineid_to_offset], fp)
+                    working_flag.unlink()
                 else:
                     time.sleep(3)
 
