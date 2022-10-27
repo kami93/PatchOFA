@@ -115,7 +115,8 @@ class TransformerEncoder(FairseqEncoder):
         self.args = args
         super().__init__(dictionary)
         self.register_buffer("version", torch.Tensor([3]))
-  
+        transformer_modules=[] # used for tracking transformer modules
+
         if getattr(args, "encoder_prompt", False):
             self.encoder_prompt_encoder = PromptEncoder(
                 type=args.encoder_prompt_type,
@@ -125,7 +126,7 @@ class TransformerEncoder(FairseqEncoder):
                 proj_dim=args.encoder_prompt_dim,
                 layers=args.encoder_layers,
                 vocab_size=args.vocab_size)
-        self.encoder_dropout = nn.Dropout(p=0.2)
+            self.encoder_dropout = nn.Dropout(p=0.2)
         
         self.dropout_module = FairseqDropout(
             args.dropout, module_name=self.__class__.__name__
@@ -147,21 +148,23 @@ class TransformerEncoder(FairseqEncoder):
 
         if getattr(args, "layernorm_embedding", False):
             self.layernorm_embedding = LayerNorm(embed_dim)
+            transformer_modules.append(self.layernorm_embedding)
         else:
             self.layernorm_embedding = None
 
         if getattr(args, "add_type_embedding", False):
             self.type_embedding = Embedding(2, embed_dim, padding_idx=None)
+            transformer_modules.append(self.type_embedding)
         else:
             self.type_embedding = None
 
         freeze_entire_resnet = resolve_str_true_false(args.freeze_entire_resnet)
-        freeze_resnet = resolve_str_true_false(args.freeze_resnet)
+        freeze_resnet = True if freeze_entire_resnet else resolve_str_true_false(args.freeze_resnet)
 
         if getattr(args, "sync_bn", False):
             norm_layer = BatchNorm2d
         else:
-            if freeze_resnet or freeze_entire_resnet:
+            if freeze_resnet:
                 logger.info("Freezing ResNet BN layers...")
                 norm_layer = FrozenBatchNorm2d
             else:
@@ -183,7 +186,7 @@ class TransformerEncoder(FairseqEncoder):
             self.embed_images.load_state_dict(resnet_state_dict)
 
         if freeze_entire_resnet:
-            logger.info("Freezing all ResNet parameters...")
+            logger.info("Freezing all ResNet and image projection params...")
             for param in self.embed_images.parameters():
                 param.requires_grad_(False)
             
@@ -192,6 +195,7 @@ class TransformerEncoder(FairseqEncoder):
 
         if getattr(args, "patch_layernorm_embedding", False):
             self.patch_layernorm_embedding = LayerNorm(embed_dim)
+            transformer_modules.append(self.patch_layernorm_embedding)
         else:
             self.patch_layernorm_embedding = None
 
@@ -205,12 +209,15 @@ class TransformerEncoder(FairseqEncoder):
         self.pos_q_linear = nn.Linear(embed_dim, embed_dim)
         self.pos_k_linear = nn.Linear(embed_dim, embed_dim)
 
+        transformer_modules += [self.embed_positions, self.embed_image_positions, self.pos_ln, self.image_pos_ln, self.pos_q_linear, self.pos_k_linear]
+
         if not args.adaptive_input and args.quant_noise_pq > 0:
             self.quant_noise = apply_quant_noise_(
                 nn.Linear(embed_dim, embed_dim, bias=False),
                 args.quant_noise_pq,
                 args.quant_noise_pq_block_size,
             )
+            transformer_modules.append(self.quant_noise)
         else:
             self.quant_noise = None
 
@@ -224,9 +231,11 @@ class TransformerEncoder(FairseqEncoder):
             [self.build_encoder_layer(args, drop_path_rate=dpr[i]) for i in range(args.encoder_layers)]
         )
         self.num_layers = len(self.layers)
+        transformer_modules.extend(self.layers)
 
         if args.encoder_normalize_before:
             self.layer_norm = LayerNorm(embed_dim)
+            transformer_modules.append(self.layer_norm)
         else:
             self.layer_norm = None
 
@@ -243,6 +252,7 @@ class TransformerEncoder(FairseqEncoder):
         self.image_rel_pos_table_list = nn.ModuleList(
             [Embedding(image_num_rel_dis, self.num_attention_heads, zero_init=True) for _ in range(args.encoder_layers)]
         )
+        transformer_modules += [self.token_rel_pos_table_list, self.image_rel_pos_table_list]
 
         self.patch_image_size = args.patch_image_size
         self.orig_patch_image_size = args.orig_patch_image_size
@@ -253,12 +263,16 @@ class TransformerEncoder(FairseqEncoder):
         self.entangle_position_embedding = args.entangle_position_embedding
         
         self.no_grad_image = resolve_str_true_false(args.no_grad_image)
-        self.freeze_encoder = resolve_str_true_false(args.freeze_encoder)
+        self.freeze_encoder_transformer = resolve_str_true_false(args.freeze_encoder_transformer)
+        if self.freeze_encoder_transformer:
+            logger.info("Freezing all encoder transformer parameters...")
+            for module in transformer_modules:
+                for param in module.parameters():
+                    param.requires_grad_(False)
 
-        if self.freeze_encoder:
-            logger.info("Freezing all Encoder parameters...")
-            for param in self.parameters():
-                param.requires_grad_(False)
+        for name, param in self.named_parameters():
+            if param.requires_grad == True:
+                logger.info(f"encoder.{name} requires grad!")
 
     def build_encoder_layer(self, args, drop_path_rate=0.0):
         layer = TransformerEncoderLayer(args, drop_path_rate=drop_path_rate, \
