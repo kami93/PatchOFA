@@ -74,7 +74,19 @@ class SegmentationConfig(OFAConfig):
     fakeimage_type: str = field(
         default='random',
         metadata={
-            "help": 'random | gt_seg'
+            "help": 'random | gt_seg | upsampling | none'
+        },
+    )
+    prompt_prefix: str = field(
+        default='',
+        metadata={
+            "help": 'could be "what is the segmentation map of the image? object:"'
+        },
+    )
+    prompt_order: str = field(
+        default='none',
+        metadata={
+            "help": 'none | randperm | sorted'
         },
     )
     prompt_type: str = field(

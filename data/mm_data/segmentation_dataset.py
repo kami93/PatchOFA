@@ -248,8 +248,14 @@ class SegmentationDataset(OFADataset):
             
             self.image_transform = Resize(img_scale=(512, 512), keep_ratio=False)
             self.downsample_gt_seg = transforms.Resize(32, transforms.InterpolationMode.NEAREST)
-            
-        self.prompt = self.encode_text(' what is the segmentation of the image?')
+        
+        prompt_prefix=self.cfg.prompt_prefix
+        if len(prompt_prefix):
+            self.prompt = self.encode_text(f' {prompt_prefix.lstrip()}')
+        else:
+            self.prompt = None
+        self.prompt_order = self.cfg.prompt_order
+
         self.pos_tgt_item = self.encode_text(" yes")
         self.neg_tgt_item = self.encode_text(" no")
         
@@ -258,10 +264,13 @@ class SegmentationDataset(OFADataset):
         self.fakeimage_prompt_type = cfg.fakeimage_prompt_type
         self.num_seg = cfg.num_seg_tokens # 150 (ade) 171 (coco-fine) 27 (coco-coarse)
         if self.num_seg == 171:
+            self.id2rawtext = [x for x in CLASSES_COCOF]
             self.id2text = [self.encode_text(f" {x}") for x in CLASSES_COCOF]
         elif self.num_seg == 27:
+            self.id2rawtext = [x for x in CLASSES_COCOC]
             self.id2text = [self.encode_text(f" {x}") for x in CLASSES_COCOC]
         elif self.num_seg == 150:
+            self.id2rawtext = [x for x in CLASSES_ADE]
             self.id2text = [self.encode_text(f" {x}") for x in CLASSES_ADE]
         else:
             raise NotImplementedError
@@ -376,26 +385,45 @@ class SegmentationDataset(OFADataset):
 
         # build 
         src_item_2 = None
-        if self.prompt_type == 'gt_seg':
-            if self.split == 'train':
-                unique_seg_ids = gt_semantic_seg_downsampled.unique()
-                randperm = torch.randperm(len(unique_seg_ids))
-                unique_seg_ids = unique_seg_ids[randperm]
-            
-                src_text = torch.cat([self.id2text[idx] for idx in unique_seg_ids])
-                src_item = torch.cat([self.bos_item, src_text, self.eos_item])
-                
+        if self.prompt_type in {'gt_seg', 'all'}:
+            if self.prompt_type == 'gt_seg' and self.split == 'train':
+                prompt_ids = gt_semantic_seg_downsampled.unique().tolist()
             else:
-                # self.prompt_type is 'all' during validation.
-                src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
-                src_item = torch.cat([self.bos_item, src_text, self.eos_item])
-        
+                prompt_ids = [idx for idx in range(self.num_seg)]
+
+            if self.prompt_order == 'random':
+                np.random.shuffle(prompt_ids)
+            elif self.prompt_order == 'sorted':
+                prompt_ids.sort(key=lambda idx: self.id2rawtext[idx])
+            elif self.prompt_order == 'none':
+                pass
+            else:
+                raise NotImplementedError
+            
+            src_text = [self.bos_item]
+            if self.prompt is not None:
+                src_text += [self.prompt]
+            
+            src_text += [self.id2text[idx] for idx in prompt_ids]
+            src_text += [self.eos_item]
+
+            src_item = torch.cat(src_text)
+
+        elif self.prompt_type == 'seg':
+            src_text = [self.bos_item]
+            if self.prompt is not None:
+                src_text += [self.prompt]
+
+            src_text += [self.seg2code[:self.num_seg], self.eos_item]
+            src_item = torch.cat(src_text)
+
         elif self.prompt_type == 'prompt':
+            assert self.prompt is not None
             src_item = torch.cat([self.bos_item, self.prompt, self.eos_item])
-        
+
         elif self.prompt_type == 'random_20':
             if self.split == 'train':
-                rand_idx = np.random.choice(self.num_seg, size=20)
+                prompt_ids = np.random.choice(self.num_seg, size=20).tolist()
                 src_text = torch.cat([self.id2text[idx] for idx in rand_idx])
                 src_item = torch.cat([self.bos_item, src_text, self.eos_item]) # src_item is the student (strong aug.)
                 
@@ -407,14 +435,6 @@ class SegmentationDataset(OFADataset):
                 # self.prompt_type is 'all' during validation.
                 src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
                 src_item = torch.cat([self.bos_item, src_text, self.eos_item])
-            
-        elif self.prompt_type == 'all':
-            src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
-            src_item = torch.cat([self.bos_item, src_text, self.eos_item])
-
-        elif self.prompt_type == 'seg':
-            src_text = self.seg2code[:self.num_seg]
-            src_item = torch.cat([self.bos_item, src_text, self.eos_item])
 
         else:
             raise NotImplementedError
@@ -433,7 +453,6 @@ class SegmentationDataset(OFADataset):
         # random_choice = mask_perm.max(-1)[1]
         
         # target_teacher = perm[batch_idx_1d, random_choice]
-        
         example = {
             "id": uniq_id,
             "source": src_item,
@@ -446,51 +465,76 @@ class SegmentationDataset(OFADataset):
             "prev_output_tokens": prev_output_item
         }
 
-        if True:
-            if self.fakeimage_type == 'gt_seg':
-                text_list = torch.cat([self.id2text[idx] for idx in gt_semantic_seg_downsampled])
-                text_length = torch.tensor([self.text_length[idx] for idx in gt_semantic_seg_downsampled], dtype=torch.long)
-                code = self.seg2code[gt_semantic_seg_downsampled]
+        if self.fakeimage_type == 'none':
+            # no fake image
+            return example
+        
+        elif self.fakeimage_type == 'gt_seg':
+            fakeimage_ids = gt_semantic_seg_downsampled.tolist()
+            
+        elif self.fakeimage_type == 'random':
+            fakeimage_ids = np.random.choice(self.num_seg, size=1024, replace=True).tolist()
+
+        elif self.fakeimage_type == 'upsampling':
+            sh, sw = torch.randint(4,16,(2,))
+            sh, sw = sh.item(), sw.item()
+            rand = np.random.choice(self.num_seg, size=sh*sw, replace=True)
+            rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
+            fakeimage_ids = self.downsample_gt_seg(rand).reshape(-1).tolist()
                 
-            elif self.fakeimage_type == 'random':
-                rand = np.random.choice(self.num_seg, size=1024, replace=True)
-                text_list = torch.cat([self.id2text[idx] for idx in rand])
-                text_length = torch.tensor([self.text_length[idx] for idx in rand], dtype=torch.long)
-                code = self.seg2code[rand]
+        else:
+            raise NotImplementedError
 
-            elif self.fakeimage_type == 'upsampling':
-                sh, sw = torch.randint(4,16,(2,))
-                sh, sw = sh.item(), sw.item()
-                rand = np.random.choice(self.num_seg, size=sh*sw, replace=True)
-                rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
-                rand = self.downsample_gt_seg(rand).reshape(-1)
-                text_list = torch.cat([self.id2text[idx] for idx in rand])
-                text_length = torch.tensor([self.text_length[idx] for idx in rand], dtype=torch.long)
-                code = self.seg2code[rand]
-                    
+        embedbag_ids = torch.cat([self.id2text[idx] for idx in fakeimage_ids])
+        embedbag_offsets = torch.tensor([self.text_length[idx] for idx in fakeimage_ids], dtype=torch.long).cumsum(dim=0)
+
+        codes = self.seg2code[fakeimage_ids]
+        target = torch.cat([codes, self.eos_item])
+        prev_output_tokens = torch.cat([self.bos_item, codes])
+
+        if self.fakeimage_prompt_type in {'gt_seg', 'all'}:
+            if self.fakeimage_prompt_type == 'gt_seg' and self.split == 'train':
+                prompt_ids = fakeimage_ids.unique().tolist()
             else:
-                raise NotImplementedError
+                prompt_ids = [idx for idx in range(self.num_seg)]
 
-            if self.fakeimage_prompt_type == 'all':
-                src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
-                src_item = torch.cat([self.bos_item, src_text, self.eos_item])
-
-            elif self.fakeimage_prompt_type == 'gt_seg':
-                unique_seg_ids = gt_semantic_seg_downsampled.unique()
-                randperm = torch.randperm(len(unique_seg_ids))
-                unique_seg_ids = unique_seg_ids[randperm]
-                    
-                src_text = torch.cat([self.id2text[idx] for idx in unique_seg_ids])
-                src_item = torch.cat([self.bos_item, src_text, self.eos_item])
-            
+            if self.prompt_order == 'random':
+                np.random.shuffle(prompt_ids)
+            elif self.prompt_order == 'sorted':
+                prompt_ids.sort(key=lambda idx: self.id2rawtext[idx])
             else:
                 raise NotImplementedError
             
-            example["text2seg_patch_image"] = text_list
-            example["text2seg_patch_mask"] = text_length.cumsum(dim=0)
-            example["text2seg_source"] = src_item
-            example["text2seg_target"] = torch.cat([code, self.eos_item])
-            example["text2seg_prev_output_tokens"] = torch.cat([self.bos_item, code])
+            src_text = [self.bos_item]
+            if self.prompt is not None:
+                src_text += [self.prompt]
+            
+            src_text += [self.id2text[idx] for idx in prompt_ids]
+            src_text += [self.eos_item]
+            src_item = torch.cat(src_text)
+
+        elif self.fakeimage_prompt_type == 'seg':
+            src_text = [self.bos_item]
+            if self.prompt is not None:
+                src_text += [self.prompt]
+
+            src_text += [self.seg2code[:self.num_seg], self.eos_item]
+            src_item = torch.cat(src_text)
+
+        elif self.fakeimage_prompt_type == 'prompt':
+            assert self.prompt is not None
+            src_item = torch.cat([self.bos_item, self.prompt, self.eos_item])
+
+        else:
+            raise NotImplementedError
+        
+        example["text2seg_patch_image"] = embedbag_ids
+        example["text2seg_patch_mask"] = embedbag_offsets
+        example["text2seg_source"] = src_item
+        example["text2seg_target"] = target
+        example["text2seg_prev_output_tokens"] = prev_output_tokens
+
+        return example
 
         # rand = random.randint(0, 149)
         # text = CLASSES[rand]
@@ -559,8 +603,6 @@ class SegmentationDataset(OFADataset):
             
         #     example["text2seg_target"] = neg_target_item
         #     example["text2seg_prev_output_tokens"] = neg_prev_output_item
-        
-        return example
 
     def get_src_item_given_pair(self, pair):
         np.random.shuffle(pair)
