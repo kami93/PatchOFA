@@ -502,6 +502,8 @@ class SegmentationDataset(OFADataset):
                 np.random.shuffle(prompt_ids)
             elif self.prompt_order == 'sorted':
                 prompt_ids.sort(key=lambda idx: self.id2rawtext[idx])
+            elif self.prompt_order == 'none':
+                pass
             else:
                 raise NotImplementedError
             
