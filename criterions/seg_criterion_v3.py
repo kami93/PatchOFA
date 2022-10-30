@@ -390,7 +390,7 @@ class SegCriterionV3(FairseqCriterion):
         else:
             compute_seg_loss = self.compute_loss
         
-        if self.effective_alpha == 0.0:
+        if self.effective_alpha == 0.0 and model.training:
             net_output = model(full_context_alignment=self.full_context_alignment, aux_input=sample["aux_input"])
             labeled_output = net_output[1].get("aux_output")
             labeled_loss = self.compute_labeled_loss(model, labeled_output, sample, update_num, reduce=reduce)
