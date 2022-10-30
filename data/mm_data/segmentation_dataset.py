@@ -478,8 +478,8 @@ class SegmentationDataset(OFADataset):
         elif self.fakeimage_type.startswith('upsampling'):
             if self.fakeimage_type == 'upsampling':
                 l, r = 1, 12
-            elif len(self.fakeimage_type.split('_')) == 3:
-                l, r = self.fakeimage_type.split('_')[1:3]
+            elif len(self.fakeimage_type.split('-')) == 3:
+                l, r = self.fakeimage_type.split('-')[1:3]
                 l, r = int(l), int(r)
             else:
                 raise NotImplementedError
