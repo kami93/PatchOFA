@@ -68,8 +68,8 @@ class SegOFAModel(TransformerModel):
 
     def forward(
         self,
-        src_tokens,
-        src_lengths,
+        src_tokens: Optional[torch.Tensor] = None,
+        src_lengths: Optional[torch.Tensor] = None,
         prev_output_tokens: Optional[torch.Tensor] = None,
         patch_images: Optional[torch.Tensor] = None,
         patch_images_2: Optional[torch.Tensor] = None,
@@ -90,46 +90,49 @@ class SegOFAModel(TransformerModel):
         if classification_head_name is not None:
             features_only = True
 
-        encoder_out = self.encoder(
-            src_tokens,
-            src_lengths=src_lengths,
-            patch_images=patch_images,
-            patch_masks=patch_masks,
-            patch_images_2=patch_images_2,
-            token_embeddings=token_embeddings,
-            return_all_hiddens=return_all_hiddens,
-            sample_patch_num=sample_patch_num
-        )
-        
-        if encoder_only:
-            return encoder_out
-        
-        x, extra = self.decoder(
-            prev_output_tokens,
-            code_masks=code_masks,
-            encoder_out=encoder_out,
-            features_only=features_only,
-            full_context_alignment=full_context_alignment,
-            alignment_layer=alignment_layer,
-            alignment_heads=alignment_heads,
-            src_lengths=src_lengths,
-            return_all_hiddens=return_all_hiddens
-        )
-        extra['encoder_returns'] = encoder_out
+        x = None
+        extra = {}
+        if src_tokens is not None:
+            encoder_out = self.encoder(
+                src_tokens,
+                src_lengths=src_lengths,
+                patch_images=patch_images,
+                patch_masks=patch_masks,
+                patch_images_2=patch_images_2,
+                token_embeddings=token_embeddings,
+                return_all_hiddens=return_all_hiddens,
+                sample_patch_num=sample_patch_num
+            )
+            
+            if encoder_only:
+                return encoder_out
+            
+            x, extra = self.decoder(
+                prev_output_tokens,
+                code_masks=code_masks,
+                encoder_out=encoder_out,
+                features_only=features_only,
+                full_context_alignment=full_context_alignment,
+                alignment_layer=alignment_layer,
+                alignment_heads=alignment_heads,
+                src_lengths=src_lengths,
+                return_all_hiddens=return_all_hiddens
+            )
+            extra['encoder_returns'] = encoder_out
 
-        pad = self.encoder.padding_idx
-        if classification_head_name is not None:
-            prev_lengths = prev_output_tokens.ne(pad).sum(1)
-            gather_index = prev_lengths[:, None, None].expand(x.size(0), 1, x.size(2)) - 1
-            sentence_representation = x.gather(1, gather_index).squeeze()
-            if self.classification_heads[classification_head_name].use_two_images:
-                hidden_size = sentence_representation.size(1)
-                sentence_representation = sentence_representation.view(-1, hidden_size * 2)
-            for k, head in self.classification_heads.items():
-                # for torch script only supports iteration
-                if k == classification_head_name:
-                    x = head(sentence_representation)
-                    break
+            pad = self.encoder.padding_idx
+            if classification_head_name is not None:
+                prev_lengths = prev_output_tokens.ne(pad).sum(1)
+                gather_index = prev_lengths[:, None, None].expand(x.size(0), 1, x.size(2)) - 1
+                sentence_representation = x.gather(1, gather_index).squeeze()
+                if self.classification_heads[classification_head_name].use_two_images:
+                    hidden_size = sentence_representation.size(1)
+                    sentence_representation = sentence_representation.view(-1, hidden_size * 2)
+                for k, head in self.classification_heads.items():
+                    # for torch script only supports iteration
+                    if k == classification_head_name:
+                        x = head(sentence_representation)
+                        break
 
         if net_input_aug is not None:
             encoder_out_aug = self.encoder(

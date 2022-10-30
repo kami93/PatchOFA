@@ -268,8 +268,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--freeze-encoder-embedding', type=str, default='false', help='freeze encoder token embedding')
         parser.add_argument('--freeze-decoder-embedding', type=str, default='false',  help='freeze decoder token embedding')
         parser.add_argument('--freeze-seg-embedding', type=str, default='false',  help='freeze seg token embedding')
-        parser.add_argument('--freeze-encoder-transformer', type=str, default='false',
-                            help='freeze the parameters in the encoder transformer')
+        parser.add_argument('--freeze-encoder-transformer', type=str, default='false', help='freeze the parameters in the encoder transformer')
+        parser.add_argument('--freeze-encoder-transformer-layers', type=int, default=0, help='freeze the parameters in the encoder transformer')
         parser.add_argument('--add-type-embedding', action='store_true',
                             help='add source/region/patch type embedding')
         parser.add_argument('--interpolate-position', action='store_true',

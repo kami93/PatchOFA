@@ -475,8 +475,16 @@ class SegmentationDataset(OFADataset):
         elif self.fakeimage_type == 'random':
             fakeimage_ids = np.random.choice(self.num_seg, size=1024, replace=True).tolist()
 
-        elif self.fakeimage_type == 'upsampling':
-            sh, sw = torch.randint(4,16,(2,))
+        elif self.fakeimage_type.startswith('upsampling'):
+            if self.fakeimage_type == 'upsampling':
+                l, r = 1, 12
+            elif len(self.fakeimage_type.split('_')) == 3:
+                l, r = self.fakeimage_type.split('_')[1:3]
+                l, r = int(l), int(r)
+            else:
+                raise NotImplementedError
+
+            sh, sw = torch.randint(l,r,(2,))
             sh, sw = sh.item(), sw.item()
             rand = np.random.choice(self.num_seg, size=sh*sw, replace=True)
             rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)

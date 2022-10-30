@@ -381,106 +381,37 @@ class SegCriterionV3(FairseqCriterion):
             self.iter = self.criterion_update_freq * update_num - 1
             logger.info(f"Restored iteration counts {self.iter}")
         
-        if self.init_seg_with_text and self.iter == -1:
-            # Do lazy initializations;
-            def encode_text(text):
-                line = [self.task.bpe.encode(' {}'.format(word.strip())) for word in text.strip().split()]
-                line = ' '.join(line)
-                
-                s = self.task.tgt_dict.encode_line(
-                    line=line,
-                    add_if_not_exist=False,
-                    append_eos=False
-                ).long()
-                return s
-
-            if self.output_classes == 150:
-                CLASSES = CLASSES_ADE
-            elif self.output_classes == 171:
-                CLASSES = CLASSES_COCOF
-            elif self.output_classes == 27:
-                CLASSES = CLASSES_COCOC
-            else:
-                raise NotImplementedError
-
-            with torch.no_grad():
-                id2text = [encode_text(f" {x}") for x in CLASSES]
-                id2text_tokens = torch.cat(id2text).cuda()
-                
-                text_length = torch.tensor([len(x) for x in id2text])
-                start_offset = torch.cat([text_length.new_zeros(size=(1, ), dtype=torch.long), text_length.cumsum(dim=0)[:-1]], dim=0).cuda()
-                
-                avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
-                model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
-                model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
-                if ema_model is not None:
-                    ema_model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
-                    ema_model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
-                
-                if not model.decoder.tie_seg_projection:
-                    model.decoder.seg_projection.weight.data = avg_embedding.data
-                    if ema_model is not None:
-                        ema_model.decoder.seg_projection.weight.data = avg_embedding.data
-                    
-            logger.info("Initialized seg tokens with embedding bag.")
-
-        # 20221006 수정사항
-        # count effective iterations given iter and criterion_update_freq
-        if model.training:
-            self.iter += 1
-            self.effective_iter = self.iter // self.criterion_update_freq
+        if self.iter == -1:
+            self._lazy_initialization(sample, model, ema_model) # Do lazy initializations;
+        self._update_iteration(sample, model, ema_model)
         
-        # 20221006 수정사항
-        # hard ramp-up 적용
-        if self.effective_iter < self.hard_rampup_iter:
-            if (self.iter == 0) and (self.hard_rampup_iter != 0):
-                logger.info(f"Set effective_alpha == 0.0 until hard_rampup iterations {self.hard_rampup_iter}")
-            self.effective_alpha = 0.0
-        else:
-            if (self.effective_iter == self.hard_rampup_iter) and (self.iter % self.criterion_update_freq == 0) and (self.hard_rampup_iter != 0):
-                logger.info(f"Hard ramp-up effective_alpha == {self.alpha} as effective_iter reached {self.hard_rampup_iter} (raw iter == {self.iter})")
-            self.effective_alpha = self.alpha
-        
-        # 20221006 수정사항
-        # embedding freeze iteration 기능 적용
-        if (self.freeze_embedding_iter == -1) or (self.effective_iter < self.freeze_embedding_iter):
-            pass
-        else:
-            if (self.effective_iter == self.freeze_embedding_iter) and (self.iter % self.criterion_update_freq == 0):
-                logger.info(f"Freezing embeddings as effective_iter reached {self.freeze_embedding_iter} (raw iter == {self.iter})")
-            model.encoder.embed_tokens.weight.requires_grad_(False)
-            model.decoder.embed_tokens.weight.requires_grad_(False)
-            model.decoder.seg_projection.weight.requires_grad_(False)
-        
-        if self.use_centering:
-            # send centering buffers to a gpu device, if applicable
-            self.center = self.center.to('cuda')
-            self.center_accumulation = self.center_accumulation.to('cuda')
-            self.center_batch_size = self.center_batch_size.to('cuda')
-            
-        if self.use_rdrop:
-            construct_rdrop_sample(sample)
-        
-        if self.alpha != 1.0 and model.training:
-            net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment, aux_input=sample["aux_input"])
-            labeled_output = net_output[1].get("aux_output")
-            labeled_loss = self.compute_labeled_loss(model, labeled_output, sample, update_num, reduce=reduce)
-            
-        else:
-            net_output = model(**sample["net_input"])
-            labeled_loss = net_output[0].new_zeros(size=(1, ))
-
-        # torch.save(net_output, "net_output.pt")
-        # torch.save(sample, "sample.pt")
-
         if self.unsupervised_segmentation:
             compute_seg_loss = self.compute_unlabled_kld_loss
         else:
             compute_seg_loss = self.compute_loss
-                
-        seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
         
-        loss = (1.0 - self.effective_alpha) * labeled_loss + self.effective_alpha * seg_loss
+        if self.effective_alpha == 0.0:
+            net_output = model(full_context_alignment=self.full_context_alignment, aux_input=sample["aux_input"])
+            labeled_output = net_output[1].get("aux_output")
+            labeled_loss = self.compute_labeled_loss(model, labeled_output, sample, update_num, reduce=reduce)
+            loss = labeled_loss
+            with torch.inference_mode():
+                seg_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment)
+                seg_loss, metrics, ntokens = compute_seg_loss(model, seg_output, sample, update_num, reduce=reduce, ema_model=ema_model)
+
+        elif self.alpha != 1.0 and model.training:
+            net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment, aux_input=sample["aux_input"])
+            labeled_output = net_output[1].get("aux_output")
+            labeled_loss = self.compute_labeled_loss(model, labeled_output, sample, update_num, reduce=reduce)
+            seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
+            loss = (1.0 - self.effective_alpha) * labeled_loss + self.effective_alpha * seg_loss
+        
+        else:
+            net_output = model(**sample["net_input"])
+            labeled_loss = net_output[0].new_zeros(size=(1, ))
+            seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
+            loss = seg_loss
+
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
@@ -865,6 +796,84 @@ class SegCriterionV3(FairseqCriterion):
         )
         total = torch.sum(mask)
         return n_correct, total
+
+    def _lazy_initialization(self, sample, model, ema_model=None):
+        if self.init_seg_with_text:
+            def encode_text(text):
+                line = [self.task.bpe.encode(' {}'.format(word.strip())) for word in text.strip().split()]
+                line = ' '.join(line)
+                
+                s = self.task.tgt_dict.encode_line(
+                    line=line,
+                    add_if_not_exist=False,
+                    append_eos=False
+                ).long()
+                return s
+
+            if self.output_classes == 150:
+                CLASSES = CLASSES_ADE
+            elif self.output_classes == 171:
+                CLASSES = CLASSES_COCOF
+            elif self.output_classes == 27:
+                CLASSES = CLASSES_COCOC
+            else:
+                raise NotImplementedError
+
+            with torch.no_grad():
+                id2text = [encode_text(f" {x}") for x in CLASSES]
+                id2text_tokens = torch.cat(id2text).cuda()
+                
+                text_length = torch.tensor([len(x) for x in id2text])
+                start_offset = torch.cat([text_length.new_zeros(size=(1, ), dtype=torch.long), text_length.cumsum(dim=0)[:-1]], dim=0).cuda()
+                
+                avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
+                model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
+                model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
+                if ema_model is not None:
+                    ema_model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
+                    ema_model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
+                
+                if not model.decoder.tie_seg_projection:
+                    model.decoder.seg_projection.weight.data = avg_embedding.data
+                    if ema_model is not None:
+                        ema_model.decoder.seg_projection.weight.data = avg_embedding.data
+                    
+            logger.info("Initialized seg tokens with embedding bag.")
+    
+    def _update_iteration(self, sample, model, ema_model=False):
+        # 20221006 수정사항
+        # count effective iterations given iter and criterion_update_freq
+        if model.training:
+            self.iter += 1
+            self.effective_iter = self.iter // self.criterion_update_freq
+        
+        # 20221006 수정사항
+        # hard ramp-up 적용
+        if self.effective_iter < self.hard_rampup_iter:
+            if (self.iter == 0) and (self.hard_rampup_iter != 0):
+                logger.info(f"Set effective_alpha == 0.0 until hard_rampup iterations {self.hard_rampup_iter}")
+            self.effective_alpha = 0.0
+        else:
+            if (self.effective_iter == self.hard_rampup_iter) and (self.iter % self.criterion_update_freq == 0) and (self.hard_rampup_iter != 0):
+                logger.info(f"Hard ramp-up effective_alpha == {self.alpha} as effective_iter reached {self.hard_rampup_iter} (raw iter == {self.iter})")
+            self.effective_alpha = self.alpha
+        
+        # 20221006 수정사항
+        # embedding freeze iteration 기능 적용
+        if (self.freeze_embedding_iter == -1) or (self.effective_iter < self.freeze_embedding_iter):
+            pass
+        else:
+            if (self.effective_iter == self.freeze_embedding_iter) and (self.iter % self.criterion_update_freq == 0):
+                logger.info(f"Freezing embeddings as effective_iter reached {self.freeze_embedding_iter} (raw iter == {self.iter})")
+            model.encoder.embed_tokens.weight.requires_grad_(False)
+            model.decoder.embed_tokens.weight.requires_grad_(False)
+            model.decoder.seg_projection.weight.requires_grad_(False)
+        
+        if self.use_centering:
+            # send centering buffers to a gpu device, if applicable
+            self.center = self.center.to('cuda')
+            self.center_accumulation = self.center_accumulation.to('cuda')
+            self.center_batch_size = self.center_batch_size.to('cuda')
 
     @torch.no_grad()
     def update_center(self, tokens):
