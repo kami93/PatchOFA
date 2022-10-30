@@ -61,11 +61,10 @@ class FileDataset:
                     logger.info(f"initializing a new one...")
                     
                     self._sweep_datafile()
-                    with open(cache_path, "wb") as fp:
+                    with open(working_flag, "wb") as fp:
                         pickle.dump([self.total_row_count, self.lineid_to_offset], fp)
-                    working_flag.unlink()
-                else:
-                    time.sleep(3)
+                    working_flag.rename(cache_path)
+                time.sleep(1)
 
             while True:
                 try:
@@ -73,7 +72,7 @@ class FileDataset:
                         self.total_row_count, self.lineid_to_offset = pickle.load(fp)
                     break
                 except:
-                    pass
+                    time.sleep(1)
 
         else:
             self._sweep_datafile()
