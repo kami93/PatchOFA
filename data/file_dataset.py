@@ -54,16 +54,19 @@ class FileDataset:
         if self.cached_index:
             cache_path = "{}.index".format(self.file_path)
             while not os.path.exists(cache_path):
-                working_flag = Path(f"{cache_path}.working")
-                if is_master_process and not working_flag.exists():
-                    working_flag.touch()
-                    logger.info(f"index cache file {cache_path} not exists!")
-                    logger.info(f"initializing a new one...")
-                    
-                    self._sweep_datafile()
-                    with open(working_flag, "wb") as fp:
-                        pickle.dump([self.total_row_count, self.lineid_to_offset], fp)
-                    working_flag.rename(cache_path)
+                try:
+                    working_flag = Path(f"{cache_path}.working")
+                    if is_master_process and not working_flag.exists():
+                        working_flag.touch()
+                        logger.info(f"index cache file {cache_path} not exists!")
+                        logger.info(f"initializing a new one...")
+                        
+                        self._sweep_datafile()
+                        with open(working_flag, "wb") as fp:
+                            pickle.dump([self.total_row_count, self.lineid_to_offset], fp)
+                        working_flag.rename(cache_path)
+                except:
+                    pass
                 time.sleep(1)
 
             while True:
