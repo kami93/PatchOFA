@@ -479,7 +479,7 @@ class SegCriterionV3(FairseqCriterion):
         #     self.update_center(logits)
 
         if self.labeled_loss_type == 'ce':
-            lprobs = F.log_softmax(logits, dim=-1, dtype=torch.float32)
+            lprobs = F.log_softmax(logits / self.student_temperature, dim=-1, dtype=torch.float32)
             loss, _, _ = label_smoothed_nll_loss(
                 lprobs,
                 target,

@@ -196,7 +196,9 @@ class SegSemiMaskedCriterionConfig(FairseqDataclass):
     img_loss_type: str = field(
         default='ce', metadata={"help": "ce | mse"}
     )
-    
+    text_loss_type: str = field(
+        default='ce', metadata={"help": "ce | mse | none"}
+    )   
 
 def resolve_str_true_false(x):
     x = x.lower()
@@ -312,6 +314,7 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         mix_ratio=0.0,
         random_mix_ratio='true',
         img_loss_type='ce',
+        text_loss_type='ce',
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -352,6 +355,7 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         
         self.mix_ratio = mix_ratio
         self.img_loss_type = img_loss_type
+        self.text_loss_type = text_loss_type
         
         self.seg_id_offset = task.target_dictionary.index("<seg_0>")
         self.constraint_start = None
@@ -389,86 +393,10 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             self.iter = self.criterion_update_freq * update_num - 1
             logger.info(f"Restored iteration counts {self.iter}")
         
-        if self.init_seg_with_text and self.iter == -1:
-            # Do lazy initializations;
-            def encode_text(text):
-                line = [self.task.bpe.encode(' {}'.format(word.strip())) for word in text.strip().split()]
-                line = ' '.join(line)
-                
-                s = self.task.tgt_dict.encode_line(
-                    line=line,
-                    add_if_not_exist=False,
-                    append_eos=False
-                ).long()
-                return s
-            
-            if self.output_classes == 150:
-                CLASSES = CLASSES_ADE
-            elif self.output_classes == 171:
-                CLASSES = CLASSES_COCOF
-            elif self.output_classes == 27:
-                CLASSES = CLASSES_COCOC
-            else:
-                raise NotImplementedError
+        if self.iter == -1:
+            self._lazy_initialization(sample, model, ema_model) # Do lazy initializations;
+        self._update_iteration(sample, model, ema_model)
 
-            with torch.no_grad():
-                id2text = [encode_text(f" {x}") for x in CLASSES]
-                id2text_tokens = torch.cat(id2text).cuda()
-                
-                text_length = torch.tensor([len(x) for x in id2text])
-                start_offset = torch.cat([text_length.new_zeros(size=(1, ), dtype=torch.long), text_length.cumsum(dim=0)[:-1]], dim=0).cuda()
-                
-                avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
-                model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
-                model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
-                if ema_model is not None:
-                    ema_model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
-                    ema_model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
-                
-                if not model.decoder.tie_seg_projection:
-                    model.decoder.seg_projection.weight.data = avg_embedding.data
-                    if ema_model is not None:
-                        ema_model.decoder.seg_projection.weight.data = avg_embedding.data
-                    
-            logger.info("Initialized seg tokens with embedding bag.")
-
-        # 20221006 수정사항
-        # count effective iterations given iter and criterion_update_freq
-        if model.training:
-            self.iter += 1
-            self.effective_iter = self.iter // self.criterion_update_freq
-        
-        # 20221006 수정사항
-        # hard ramp-up 적용
-        if self.effective_iter < self.hard_rampup_iter:
-            if (self.iter == 0) and (self.hard_rampup_iter != 0):
-                logger.info(f"Set effective_alpha == 0.0 until hard_rampup iterations {self.hard_rampup_iter}")
-            self.effective_alpha = 0.0
-        else:
-            if (self.effective_iter == self.hard_rampup_iter) and (self.iter % self.criterion_update_freq == 0) and (self.hard_rampup_iter != 0):
-                logger.info(f"Hard ramp-up effective_alpha == {self.alpha} as effective_iter reached {self.hard_rampup_iter} (raw iter == {self.iter})")
-            self.effective_alpha = self.alpha
-        
-        # 20221006 수정사항
-        # embedding freeze iteration 기능 적용
-        if (self.freeze_embedding_iter == -1) or (self.effective_iter < self.freeze_embedding_iter):
-            pass
-        else:
-            if (self.effective_iter == self.freeze_embedding_iter) and (self.iter % self.criterion_update_freq == 0):
-                logger.info(f"Freezing embeddings as effective_iter reached {self.freeze_embedding_iter} (raw iter == {self.iter})")
-            model.encoder.embed_tokens.weight.requires_grad_(False)
-            model.decoder.embed_tokens.weight.requires_grad_(False)
-            model.decoder.seg_projection.weight.requires_grad_(False)
-        
-        if self.use_centering:
-            # send centering buffers to a gpu device, if applicable
-            self.center = self.center.to('cuda')
-            self.center_accumulation = self.center_accumulation.to('cuda')
-            self.center_batch_size = self.center_batch_size.to('cuda')
-            
-        if self.use_rdrop:
-            construct_rdrop_sample(sample)
-        
         #######
         logging_output = {}
         if model.training:
@@ -491,8 +419,10 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             
             mix_mask = torch.zeros([N, L], dtype=torch.bool, device='cuda')
             mix_mask = mix_mask.scatter_(dim=1, index=ids_keep, src=torch.ones_like(ids_keep, dtype=torch.bool, device='cuda'))
-            
-            net_output = model(**sample["labeled_input"], full_context_alignment=self.full_context_alignment, mix_mask=mix_mask[:,:-1])
+            sample["net_input"]["fake_image_tokens"] = sample["aux_input"]["patch_images"]
+            sample["net_input"]["fake_image_token_offsets"] = sample["aux_input"]["patch_masks"]
+
+            net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment, mix_mask=mix_mask[:,:-1])
             labeled_loss_img, labeled_loss_text = self.compute_labeled_loss(model, net_output, sample, update_num, reduce=reduce, mix_mask=mix_mask)
             loss = (1.0 - self.alpha) * labeled_loss_img + self.alpha * labeled_loss_text
             logging_output['loss'] = loss.data
@@ -599,23 +529,110 @@ class SegSemiMaskedCriterion(FairseqCriterion):
         
         return loss, sample_size, logging_output
 
-    def upsample_logits(self, logits):
-        logits_ = logits[:, :-1]
+    def _lazy_initialization(self, sample, model, ema_model=None):
+        if self.init_seg_with_text:
+            def encode_text(text):
+                line = [self.task.bpe.encode(' {}'.format(word.strip())) for word in text.strip().split()]
+                line = ' '.join(line)
+                
+                s = self.task.tgt_dict.encode_line(
+                    line=line,
+                    add_if_not_exist=False,
+                    append_eos=False
+                ).long()
+                return s
+
+            if self.output_classes == 150:
+                CLASSES = CLASSES_ADE
+            elif self.output_classes == 171:
+                CLASSES = CLASSES_COCOF
+            elif self.output_classes == 27:
+                CLASSES = CLASSES_COCOC
+            else:
+                raise NotImplementedError
+
+            with torch.no_grad():
+                id2text = [encode_text(f" {x}") for x in CLASSES]
+                id2text_tokens = torch.cat(id2text).cuda()
+                
+                text_length = torch.tensor([len(x) for x in id2text])
+                start_offset = torch.cat([text_length.new_zeros(size=(1, ), dtype=torch.long), text_length.cumsum(dim=0)[:-1]], dim=0).cuda()
+                
+                avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
+                model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
+                model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
+                if ema_model is not None:
+                    ema_model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
+                    ema_model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
+                
+                if not model.decoder.tie_seg_projection:
+                    model.decoder.seg_projection.weight.data = avg_embedding.data
+                    if ema_model is not None:
+                        ema_model.decoder.seg_projection.weight.data = avg_embedding.data
+                    
+            logger.info("Initialized seg tokens with embedding bag.")
+    
+    def _update_iteration(self, sample, model, ema_model=False):
+        # 20221006 수정사항
+        # count effective iterations given iter and criterion_update_freq
+        if model.training:
+            self.iter += 1
+            self.effective_iter = self.iter // self.criterion_update_freq
+        
+        # 20221006 수정사항
+        # hard ramp-up 적용
+        if self.effective_iter < self.hard_rampup_iter:
+            if (self.iter == 0) and (self.hard_rampup_iter != 0):
+                logger.info(f"Set effective_alpha == 0.0 until hard_rampup iterations {self.hard_rampup_iter}")
+            self.effective_alpha = 0.0
+        else:
+            if (self.effective_iter == self.hard_rampup_iter) and (self.iter % self.criterion_update_freq == 0) and (self.hard_rampup_iter != 0):
+                logger.info(f"Hard ramp-up effective_alpha == {self.alpha} as effective_iter reached {self.hard_rampup_iter} (raw iter == {self.iter})")
+            self.effective_alpha = self.alpha
+        
+        # 20221006 수정사항
+        # embedding freeze iteration 기능 적용
+        if (self.freeze_embedding_iter == -1) or (self.effective_iter < self.freeze_embedding_iter):
+            pass
+        else:
+            if (self.effective_iter == self.freeze_embedding_iter) and (self.iter % self.criterion_update_freq == 0):
+                logger.info(f"Freezing embeddings as effective_iter reached {self.freeze_embedding_iter} (raw iter == {self.iter})")
+            model.encoder.embed_tokens.weight.requires_grad_(False)
+            model.decoder.embed_tokens.weight.requires_grad_(False)
+            model.decoder.seg_projection.weight.requires_grad_(False)
+        
+        if self.use_centering:
+            # send centering buffers to a gpu device, if applicable
+            self.center = self.center.to('cuda')
+            self.center_accumulation = self.center_accumulation.to('cuda')
+            self.center_batch_size = self.center_batch_size.to('cuda')
+
+
+    def upsample_logits(self, logits, eos=True):
+        if eos:
+            logits_ = logits[:, :-1]
+        else:
+            logits_ = logits
         logits_ = rearrange(logits_, 'b (h w) d -> b d h w', h=32, w=32)
         logits_ = resize(logits_, size=(512, 512), mode='bilinear', align_corners=False)
         logits_ = rearrange(logits_, 'b d h w -> b (h w) d')
-        logits = torch.cat([logits_, logits[:, -1:]], dim=1)
+        if eos:
+            logits = torch.cat([logits_, logits[:, -1:]], dim=1)
+        else:
+            logits = logits_
         
         return logits
 
     def compute_labeled_loss(self, model, net_output, sample, update_num, reduce=True, mix_mask=None):
         classifier_logits_lowres, extra = net_output
+        penultimate_lowres = extra['penultimate']
         # calculate upscaled versions
         if self.upscale_lprobs:
-            raise NotImplementedError
             classifier_logits = self.upsample_logits(classifier_logits_lowres) # bilinear upsample
+            target = sample.get("target")
+            classifier_logits = classifier_logits.float()
+            penultimate = self.upsample_logits(penultimate_lowres).float()
 
-            target = sample.get("target_labeled")
             target_shape = target.shape
             assert target_shape == classifier_logits.shape[:-1]
 
@@ -623,26 +640,36 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             assert self.ignore_eos
             
             eos_masks = target.eq(self.task.tgt_dict.eos())
-            # sample_masks = torch.logical_or(sample_masks, eos_masks)
             
-            sample_masks_img = torch.logical_or(sample_masks, eos_masks, mix_mask)
-            sample_masks_text = torch.logical_or(sample_masks, eos_masks, ~mix_mask)
-                
+            sample_masks = torch.logical_or(sample_masks, eos_masks)
+            mix_mask_upscale = self.upsample_logits(mix_mask.unsqueeze(-1).float()).squeeze(-1) >= 0.5
+            sample_masks_img = torch.logical_or(sample_masks, mix_mask_upscale)
+            sample_masks_text = torch.logical_or(sample_masks, ~mix_mask_upscale)
+
             target = target - self.seg_id_offset
     
             target_img = target[~sample_masks_img]
-            target_text = target[~sample_masks_text]
-        
-            logits_labeled = classifier_logits
-            target_labeled = target
+            target_text = self.upsample_logits(extra['encoder_returns']['image_embed_before_scale'][0], False)[~sample_masks_text[:, :-1]].float()
+
+            if self.img_loss_type == 'ce':
+                classifier_logits = classifier_logits[~sample_masks_img]
+                loss_img = F.cross_entropy(classifier_logits, target_img.detach(), label_smoothing=self.eps)
+            else:
+                raise NotImplementedError
+
+            # MSE for text loss
+            penultimate_text = penultimate[~sample_masks_text].float()
+            
+            mean = target_text.mean(-1, keepdim=True)
+            var = target_text.var(-1, keepdim=True)
+            target_text = (target_text - mean) / (var + 1.e-6)**.5
+            
+            loss_text = F.mse_loss(penultimate_text, target_text.detach())
+
         else:
-            target_lowres = sample.get("downsampled_target_labeled")
+            target_lowres = sample.get("downsampled_target")
             sample_masks_lowres = None # ignoring idx mask for "sample" dimension
             classifier_logits_lowres = classifier_logits_lowres.float()
-            penultimate_lowres = extra['penultimate']
-            
-            if self.unlabeled_head_type == 'separate':
-                penultimate_lowres = self.unlabeled_head(penultimate_lowres)
             
             target_lowres_shape = target_lowres.shape
             assert target_lowres_shape == classifier_logits_lowres.shape[:-1]
@@ -661,30 +688,20 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             target_lowres_img = target_lowres[~sample_masks_lowres_img]
             target_lowres_text = extra['encoder_returns']['image_embed_before_scale'][0][~sample_masks_lowres_text[:, :-1]].float()
 
-        if self.img_loss_type == 'ce':
-            classifier_logits_lowres_img = classifier_logits_lowres[~sample_masks_lowres_img]
-            loss_img = F.cross_entropy(classifier_logits_lowres_img, target_lowres_img.detach(), label_smoothing=self.eps)
+            if self.img_loss_type == 'ce':
+                classifier_logits_lowres_img = classifier_logits_lowres[~sample_masks_lowres_img]
+                loss_img = F.cross_entropy(classifier_logits_lowres_img, target_lowres_img.detach(), label_smoothing=self.eps)
+            else:
+                raise NotImplementedError
+
+            # MSE for text loss
+            penultimate_lowres_text = penultimate_lowres[~sample_masks_lowres_text].float()
             
-        elif self.img_loss_type == 'mse':
-            assert self.init_seg_with_text and model.decoder.tie_seg_projection
-            penultimate_lowres_img = penultimate_lowres[~sample_masks_lowres_img].float()
-            with torch.no_grad():
-                projection_weight = model.decoder.seg_projection.weight.detach()
-                target_lowres_img = projection_weight[target_lowres_img].float()
-
-            loss_img = F.mse_loss(penultimate_lowres_img, target_lowres_img.detach())
-        
-        else:
-            raise NotImplementedError
-
-        # MSE for text loss
-        penultimate_lowres_text = penultimate_lowres[~sample_masks_lowres_text].float()
-        
-        mean = target_lowres_text.mean(-1, keepdim=True)
-        var = target_lowres_text.var(-1, keepdim=True)
-        target_lowres_text = (target_lowres_text - mean) / (var + 1.e-6)**.5
-        
-        loss_text = F.mse_loss(penultimate_lowres_text, target_lowres_text.detach())
+            mean = target_lowres_text.mean(-1, keepdim=True)
+            var = target_lowres_text.var(-1, keepdim=True)
+            target_lowres_text = (target_lowres_text - mean) / (var + 1.e-6)**.5
+            
+            loss_text = F.mse_loss(penultimate_lowres_text, target_lowres_text.detach())
 
         return loss_img, loss_text
 

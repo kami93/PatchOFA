@@ -263,17 +263,22 @@ class SegmentationDataset(OFADataset):
         self.prompt_type = cfg.prompt_type
         self.fakeimage_prompt_type = cfg.fakeimage_prompt_type
         self.num_seg = cfg.num_seg_tokens # 150 (ade) 171 (coco-fine) 27 (coco-coarse)
-        if self.num_seg == 171:
+        if self.num_seg == 170+1:
             self.id2rawtext = [x for x in CLASSES_COCOF]
-            self.id2text = [self.encode_text(f" {x}") for x in CLASSES_COCOF]
-        elif self.num_seg == 27:
+        elif self.num_seg == 26+1:
             self.id2rawtext = [x for x in CLASSES_COCOC]
-            self.id2text = [self.encode_text(f" {x}") for x in CLASSES_COCOC]
-        elif self.num_seg == 150:
+        elif self.num_seg == 149+1:
             self.id2rawtext = [x for x in CLASSES_ADE]
-            self.id2text = [self.encode_text(f" {x}") for x in CLASSES_ADE]
+        elif self.num_seg == 168+1:
+            self.id2rawtext = [x for x in CLASSES_COCOC]
+            self.id2rawtext = self.id2rawtext + [x for x in CLASSES_ADE if x not in CLASSES_COCOC]
+        elif self.num_seg == 197+1:
+            self.id2rawtext = [x for x in CLASSES_COCOC]
+            self.id2rawtext = self.id2rawtext + [x for x in CLASSES_COCOF if x not in CLASSES_COCOC]
         else:
             raise NotImplementedError
+        
+        self.id2text = [self.encode_text(f" {x}") for x in self.id2rawtext]
         self.text_length = torch.tensor([len(x) for x in self.id2text])
 
         self.id2seg = np.array([f'<seg_{idx}>' for idx in range(self.num_seg + 1)])
@@ -509,7 +514,7 @@ class SegmentationDataset(OFADataset):
             if self.prompt_order == 'random':
                 np.random.shuffle(prompt_ids)
             elif self.prompt_order == 'sorted':
-                prompt_ids.sort(key=lambda idx: self.id2rawtext[idx])
+                prompt_ids.sort()
             elif self.prompt_order == 'none':
                 pass
             else:
