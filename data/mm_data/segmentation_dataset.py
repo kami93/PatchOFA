@@ -399,7 +399,7 @@ class SegmentationDataset(OFADataset):
             if self.prompt_order == 'random':
                 np.random.shuffle(prompt_ids)
             elif self.prompt_order == 'sorted':
-                prompt_ids.sort(key=lambda idx: self.id2rawtext[idx])
+                prompt_ids.sort()
             elif self.prompt_order == 'none':
                 pass
             else:
