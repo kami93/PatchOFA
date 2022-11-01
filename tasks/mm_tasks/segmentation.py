@@ -105,6 +105,14 @@ class SegmentationConfig(OFAConfig):
         default=150,
         metadata={"help": "number of seg tokens"},
     )
+    image_corruption_name: str = field(
+        default='none',
+        metadata={"help": "corruption name for robustness testing. one of: (gaussian_noise, shot_noise, impulse_noise, defocus_blur, glass_blur, motion_blur, zoom_blur, snow, frost, fog, brightness, contrast, elastic_transform, pixelate, jpeg_compression, speckle_noise, gaussian_blur, spatter, saturate)"},
+    )
+    image_corruption_severity: int = field(
+        default=1,
+        metadata={"help": "1-5"},
+    )
 
 @register_task("segmentation", dataclass=SegmentationConfig)
 class SegmentationTask(OFATask):
