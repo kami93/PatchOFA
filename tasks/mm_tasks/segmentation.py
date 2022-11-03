@@ -163,6 +163,9 @@ class SegmentationTask(OFATask):
         
         # assert self.cfg.selected_cols == '0,1,2'
         dataset = FileDataset(table_path, self.cfg.selected_cols)
+        # if split == 'train':
+        #     dataset.total_row_count = 1600
+        #     dataset._compute_start_pos_and_row_count()
 
         self.datasets[split] = SegmentationDataset(
             split,
