@@ -435,7 +435,7 @@ def elastic_transform(image, severity=1, rng=None):
     if rng is None:
         rng = np.random.default_rng()
 
-    H, W = image.shape[:2]
+    H, W = image.size
     c = [(H * 2, H * 0.7, H * 0.1),
          (H * 2, H * 0.08, H * 0.2),
          (H * 0.05, H * 0.01, H * 0.02),
