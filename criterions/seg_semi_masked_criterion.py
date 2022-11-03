@@ -423,81 +423,84 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             sample["net_input"]["fake_image_token_offsets"] = sample["aux_input"]["patch_masks"]
 
             net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment, mix_mask=mix_mask[:,:-1])
-            labeled_loss_img, labeled_loss_text = self.compute_labeled_loss(model, net_output, sample, update_num, reduce=reduce, mix_mask=mix_mask)
-            loss = (1.0 - self.alpha) * labeled_loss_img + self.alpha * labeled_loss_text
-            logging_output['loss'] = loss.data
-            logging_output['image_loss'] = labeled_loss_img.data
-            logging_output['text_loss'] = labeled_loss_text.data
+            loss, metrics, ntokens = self.compute_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
+            # labeled_loss_img, labeled_loss_text = self.compute_labeled_loss(model, net_output, sample, update_num, reduce=reduce, mix_mask=mix_mask)
+            # loss = (1.0 - self.alpha) * labeled_loss_img + self.alpha * labeled_loss_text
+            # logging_output['loss'] = loss.data
+            # logging_output['image_loss'] = labeled_loss_img.data
+            # logging_output['text_loss'] = labeled_loss_text.data
         else:
-            loss = torch.zeros(size=(1, 0), device='cuda')
+            net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment)
+            loss, metrics, ntokens = self.compute_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
+            # loss = torch.zeros(size=(1, 0), device='cuda')
 
-        with torch.no_grad():
-            metric_output = model(**sample["net_input"])
+        # with torch.no_grad():
+        #     metric_output = model(**sample["net_input"])
 
-        classifier_scores_lowres, extra = metric_output
-        if self.img_loss_type == 'mse':
-            penultimate = extra['penultimate']
-            assert self.init_seg_with_text and model.decoder.tie_seg_projection
-            with torch.no_grad():
-                projection_weight = model.decoder.seg_projection.weight.detach()
-            classifier_scores_lowres = -(penultimate @ projection_weight.T)
-            classifier_scores_lowres = classifier_scores_lowres.float()
+        # classifier_scores_lowres, extra = metric_output
+        # if self.img_loss_type == 'mse':
+        #     penultimate = extra['penultimate']
+        #     assert self.init_seg_with_text and model.decoder.tie_seg_projection
+        #     with torch.no_grad():
+        #         projection_weight = model.decoder.seg_projection.weight.detach()
+        #     classifier_scores_lowres = -(penultimate @ projection_weight.T)
+        #     classifier_scores_lowres = classifier_scores_lowres.float()
 
-        target_lowres = sample.get("downsampled_target")
-        sample_masks_lowres = None # ignoring idx mask for "sample" dimension
+        # target_lowres = sample.get("downsampled_target")
+        # sample_masks_lowres = None # ignoring idx mask for "sample" dimension
 
-        classifier_scores_lowres = classifier_scores_lowres.float()
-        target_lowres_shape = target_lowres.shape
-        assert target_lowres_shape == classifier_scores_lowres.shape[:-1]
+        # classifier_scores_lowres = classifier_scores_lowres.float()
+        # target_lowres_shape = target_lowres.shape
+        # assert target_lowres_shape == classifier_scores_lowres.shape[:-1]
 
-        sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+self.output_classes))
-        if self.ignore_eos:
-            eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
-            sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
+        # sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+self.output_classes))
+        # if self.ignore_eos:
+        #     eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
+        #     sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
 
-        # calculate upscaled versions
-        target = sample.get("target")
-        sample_masks = None
-        constraint_masks = None
+        # # calculate upscaled versions
+        # target = sample.get("target")
+        # sample_masks = None
+        # constraint_masks = None
 
-        classifier_scores = self.upsample_logits(classifier_scores_lowres) # bilinear upsample
-        target_shape = target.shape
-        assert target_shape == classifier_scores.shape[:-1]
+        # classifier_scores = self.upsample_logits(classifier_scores_lowres) # bilinear upsample
+        # target_shape = target.shape
+        # assert target_shape == classifier_scores.shape[:-1]
 
-        sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+self.output_classes))
-        if self.ignore_eos:
-            eos_masks = target.eq(self.task.tgt_dict.eos())
-            sample_masks = torch.logical_or(sample_masks, eos_masks)
+        # sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+self.output_classes))
+        # if self.ignore_eos:
+        #     eos_masks = target.eq(self.task.tgt_dict.eos())
+        #     sample_masks = torch.logical_or(sample_masks, eos_masks)
 
-        # apply masking to targets
-        target_lowres = target_lowres[~sample_masks_lowres] - self.seg_id_offset
-        target = target[~sample_masks] - self.seg_id_offset
+        # # apply masking to targets
+        # target_lowres = target_lowres[~sample_masks_lowres] - self.seg_id_offset
+        # target = target[~sample_masks] - self.seg_id_offset
 
-        ntokens = 1
-        metrics = dict()
-        with torch.no_grad():
-            classifier_scores_lowres = classifier_scores_lowres[~sample_masks_lowres]
-            classifier_scores = classifier_scores[~sample_masks]
+        # ntokens = 1
+        # metrics = dict()
+        # with torch.no_grad():
+        #     classifier_scores_lowres = classifier_scores_lowres[~sample_masks_lowres]
+        #     classifier_scores = classifier_scores[~sample_masks]
             
-            if self.img_loss_type == 'ce':
-                metrics["nll_loss"] = F.cross_entropy(classifier_scores_lowres.detach(), target_lowres.detach()) # just for display
-            elif self.img_loss_type == 'mse':
-                projection_weight = model.decoder.seg_projection.weight.detach()
-                projection_lowres = projection_weight[target_lowres].float()
+        #     if self.img_loss_type == 'ce':
+        #         metrics["nll_loss"] = F.cross_entropy(classifier_scores_lowres.detach(), target_lowres.detach()) # just for display
+        #     elif self.img_loss_type == 'mse':
+        #         projection_weight = model.decoder.seg_projection.weight.detach()
+        #         projection_lowres = projection_weight[target_lowres].float()
                 
-                metrics["mse_loss"] = F.mse_loss(penultimate[~sample_masks_lowres].detach(), projection_lowres.detach()) # just for display
+        #         metrics["mse_loss"] = F.mse_loss(penultimate[~sample_masks_lowres].detach(), projection_lowres.detach()) # just for display
 
-            area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_scores_lowres.detach(), target_lowres.detach())
-            metrics["area_intersect_lowres"] = area_intersect_lowres
-            metrics["area_pred_label_lowres"] = area_pred_label_lowres
-            metrics["area_label_lowres"] = area_label_lowres
-            metrics["area_union_lowres"] = area_union_lowres
+        #     area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_scores_lowres.detach(), target_lowres.detach())
+        #     metrics["area_intersect_lowres"] = area_intersect_lowres
+        #     metrics["area_pred_label_lowres"] = area_pred_label_lowres
+        #     metrics["area_label_lowres"] = area_label_lowres
+        #     metrics["area_union_lowres"] = area_union_lowres
 
-            area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_scores.detach(), target.detach())
-            metrics["area_intersect"] = area_intersect
-            metrics["area_pred_label"] = area_pred_label
-            metrics["area_label"] = area_label
-            metrics["area_union"] = area_union
+        #     area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_scores.detach(), target.detach())
+        #     metrics["area_intersect"] = area_intersect
+        #     metrics["area_pred_label"] = area_pred_label
+        #     metrics["area_label"] = area_label
+        #     metrics["area_union"] = area_union
         
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
@@ -622,6 +625,64 @@ class SegSemiMaskedCriterion(FairseqCriterion):
             logits = logits_
         
         return logits
+
+    def compute_loss(self, model, net_output, sample, update_num, reduce=True, ema_model=None):
+        classifier_scores_lowres, extra = net_output
+
+        target_lowres = sample.get("downsampled_target")
+        sample_masks_lowres = None # ignoring idx mask for "sample" dimension
+
+        classifier_scores_lowres = classifier_scores_lowres.float()
+        target_lowres_shape = target_lowres.shape
+        assert target_lowres_shape == classifier_scores_lowres.shape[:-1]
+
+        sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+self.output_classes))
+        eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
+        sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
+
+        # calculate upscaled versions
+        target = sample.get("target")
+        sample_masks = None
+
+        classifier_scores = self.upsample_logits(classifier_scores_lowres) # bilinear upsample
+        target_shape = target.shape
+        assert target_shape == classifier_scores.shape[:-1]
+
+        sample_masks = torch.logical_or(target == self.padding_idx, target == (self.seg_id_offset+self.output_classes))
+        eos_masks = target.eq(self.task.tgt_dict.eos())
+        sample_masks = torch.logical_or(sample_masks, eos_masks)
+
+        # apply masking to targets
+        target_lowres = target_lowres[~sample_masks_lowres] - self.seg_id_offset
+        target = target[~sample_masks] - self.seg_id_offset
+
+        ntokens = 1
+
+        classifier_scores_lowres = classifier_scores_lowres[~sample_masks_lowres]
+        classifier_scores = classifier_scores[~sample_masks]
+
+        if self.upscale_lprobs:
+            loss = F.cross_entropy(classifier_scores, target.detach(), label_smoothing=self.eps) # just for display
+        else:
+            loss = F.cross_entropy(classifier_scores_lowres, target_lowres.detach(), label_smoothing=self.eps) # just for display
+
+        area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_scores_lowres.detach(), target_lowres.detach())
+        area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_scores.detach(), target.detach())
+
+        metrics = dict()
+        metrics["nll_loss"] = loss
+
+        metrics["area_intersect_lowres"] = area_intersect_lowres
+        metrics["area_pred_label_lowres"] = area_pred_label_lowres
+        metrics["area_label_lowres"] = area_label_lowres
+        metrics["area_union_lowres"] = area_union_lowres
+
+        metrics["area_intersect"] = area_intersect
+        metrics["area_pred_label"] = area_pred_label
+        metrics["area_label"] = area_label
+        metrics["area_union"] = area_union
+
+        return loss, metrics, ntokens
 
     def compute_labeled_loss(self, model, net_output, sample, update_num, reduce=True, mix_mask=None):
         classifier_logits_lowres, extra = net_output
