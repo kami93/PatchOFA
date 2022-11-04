@@ -750,10 +750,11 @@ class SegCriterionV3(FairseqCriterion):
         classifier_scores_lowres = classifier_scores_lowres[~sample_masks_lowres]
         classifier_scores = classifier_scores[~sample_masks]
 
+        assert self.student_temperature == 1.0 # to avoid mistakes...
         if self.upscale_lprobs:
-            loss = F.cross_entropy(classifier_scores, target.detach(), label_smoothing=self.eps) # just for display
+            loss = F.cross_entropy(classifier_scores / self.student_temperature, target.detach(), label_smoothing=self.eps) # just for display
         else:
-            loss = F.cross_entropy(classifier_scores_lowres, target_lowres.detach(), label_smoothing=self.eps) # just for display
+            loss = F.cross_entropy(classifier_scores_lowres / self.student_temperature, target_lowres.detach(), label_smoothing=self.eps) # just for display
 
         area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_scores_lowres.detach(), target_lowres.detach())
         area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_scores.detach(), target.detach())
