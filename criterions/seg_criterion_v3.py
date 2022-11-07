@@ -94,6 +94,35 @@ CLASSES_COCOC = np.array([
     'building', 'ground', 'plant', 'sky', 'solid', 
     'structural', 'water'])
 
+CLASSES_COCOC_AUGMENTED = [
+    ['electronic', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone'],
+    ['appliance', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'blender'],
+    ['food', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake'],
+    ['furniture', 'chair', 'couch', 'potted plant', 'bed', 'mirror', 'dining table', 'window', 'desk', 'toilet', 'door'],
+    ['book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush', 'hair brush'],
+    ['kitchen', 'bottle', 'plate', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl'],
+    ['accessory', 'hat', 'backpack', 'umbrella', 'shoe', 'eye glasses', 'handbag', 'tie', 'suitcase'],
+    ['animal', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'],
+    ['traffic light', 'fire hydrant', 'street sign', 'stop sign', 'parking meter', 'bench'],
+    ['person', 'man', 'woman', 'child', 'boy', 'girl'],
+    ['sports', 'frisbee', 'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket'],
+    ['vehicle', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat'],
+    ['ceiling', 'ceiling tile'],
+    ['floor', 'carpet', 'marble flooring', 'stone flooring', 'tile flooring', 'wood flooring'],
+    ['food', 'fruit', 'salad', 'vegetable'],
+    ['furniture', 'cabinet', 'counter', 'cupboard', 'desk', 'door', 'light', 'mirror', 'shelf', 'stairs', 'table'],
+    ['cardboard', 'metal', 'paper', 'plastic'],
+    ['textile', 'banner', 'blanket', 'cloth', 'clothes', 'curtain', 'mat', 'napkin', 'pillow', 'rug', 'towel'],
+    ['wall', 'brick wall', 'concrete wall', 'panel wall', 'stone wall', 'tile wall', 'wood wall'],
+    ['window', 'blind window'],
+    ['building', 'bridge', 'house', 'roof', 'skyscraper', 'tent'],
+    ['ground', 'dirt', 'gravel', 'mud', 'pavement', 'platform', 'playingfield', 'railroad', 'road', 'sand', 'snow'],
+    ['plant', 'branch', 'bush', 'flower', 'grass', 'leaves', 'moss', 'straw', 'tree'],
+    ['sky', 'clouds'],
+    ['hill', 'mountain', 'rock', 'stone', 'wood'],
+    ['structural', 'cage', 'fence', 'net', 'railing'],
+    ['water', 'fog', 'river', 'sea', 'ocean', 'waterdrops', 'lake']]
+
 @dataclass
 class SegCriterionV3Config(FairseqDataclass):
     label_smoothing: float = field(
@@ -536,13 +565,7 @@ class SegCriterionV3(FairseqCriterion):
         #     self.update_center(logits)
 
         if self.labeled_loss_type == 'ce':
-            lprobs = F.log_softmax(logits / self.student_temperature, dim=-1, dtype=torch.float32)
-            loss, _, _ = label_smoothed_nll_loss(
-                lprobs,
-                target,
-                0.0,
-                update_num
-            )
+            loss = F.cross_entropy(logits / self.student_temperature, target.detach(), label_smoothing=self.eps)
             
         elif self.labeled_loss_type == 'mse':
             assert self.init_seg_with_text and model.decoder.tie_seg_projection
@@ -919,28 +942,45 @@ class SegCriterionV3(FairseqCriterion):
             elif self.output_classes == 171:
                 CLASSES = CLASSES_COCOF
             elif self.output_classes == 27:
-                CLASSES = CLASSES_COCOC
+                CLASSES = CLASSES_COCOC_AUGMENTED
             else:
                 raise NotImplementedError
 
-            with torch.no_grad():
-                id2text = [encode_text(f" {x}") for x in CLASSES]
-                id2text_tokens = torch.cat(id2text).cuda()
+            with torch.inference_mode():
+                if isinstance(CLASSES[0], list):
+                    avg_embedding_list = []
+                    for id2rawtext in CLASSES:
+                        id2text = [encode_text(f" {x}") for x in id2rawtext]
+                        id2text_tokens = torch.cat(id2text).cuda()
+
+                        text_length = torch.tensor([len(x) for x in id2text])
+                        start_offset = torch.cat([text_length.new_zeros(size=(1, ), dtype=torch.long), text_length.cumsum(dim=0)[:-1]], dim=0).cuda()
+
+                        avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
+                        avg_embedding_list.append(avg_embedding.mean(0, keepdim=True))
+
+                    avg_embedding = torch.cat(avg_embedding_list, dim=0).data
                 
-                text_length = torch.tensor([len(x) for x in id2text])
-                start_offset = torch.cat([text_length.new_zeros(size=(1, ), dtype=torch.long), text_length.cumsum(dim=0)[:-1]], dim=0).cuda()
-                
-                avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset)
-                model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
-                model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
+                else:
+                    id2text = [encode_text(f" {x}") for x in CLASSES]
+                    id2text_tokens = torch.cat(id2text).cuda()
+                    
+                    text_length = torch.tensor([len(x) for x in id2text])
+                    start_offset = torch.cat([text_length.new_zeros(size=(1, ), dtype=torch.long), text_length.cumsum(dim=0)[:-1]], dim=0).cuda()
+                    
+                    avg_embedding = model.encoder.embed_tokens_bag(id2text_tokens, offsets=start_offset).data
+            
+            avg_embedding = avg_embedding.clone()
+            model.encoder.seg_embed_tokens.weight.data = avg_embedding
+            model.decoder.seg_embed_tokens.weight.data = avg_embedding
+            if ema_model is not None:
+                ema_model.encoder.seg_embed_tokens.weight.data = avg_embedding
+                ema_model.decoder.seg_embed_tokens.weight.data = avg_embedding
+            
+            if not model.decoder.tie_seg_projection:
+                model.decoder.seg_projection.weight.data = avg_embedding
                 if ema_model is not None:
-                    ema_model.encoder.seg_embed_tokens.weight.data = avg_embedding.data
-                    ema_model.decoder.seg_embed_tokens.weight.data = avg_embedding.data
-                
-                if not model.decoder.tie_seg_projection:
-                    model.decoder.seg_projection.weight.data = avg_embedding.data
-                    if ema_model is not None:
-                        ema_model.decoder.seg_projection.weight.data = avg_embedding.data
+                    ema_model.decoder.seg_projection.weight.data = avg_embedding
                     
             logger.info("Initialized seg tokens with embedding bag.")
     

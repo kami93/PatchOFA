@@ -33,6 +33,9 @@ corruption_tuple = (gaussian_noise, shot_noise, impulse_noise, defocus_blur,
                     speckle_noise, gaussian_blur, spatter, saturate)
 corruption_dict = {corr_func.__name__: corr_func for corr_func in corruption_tuple}
 
+def flatten(l):
+    return [item for sublist in l for item in sublist]
+
 def corrupt(x, severity=1, corruption_name=None, corruption_number=-1, seed=None):
     """
     :param x: image to corrupt; a 224x224x3 numpy array in [0, 255]
@@ -132,6 +135,35 @@ CLASSES_COCOC = np.array([
     'furniture-stuff', 'raw material', 'textile', 'wall', 'window', 
     'building', 'ground', 'plant', 'sky', 'solid', 
     'structural', 'water', 'unknown'])
+
+CLASSES_COCOC_AUGMENTED = [
+    ['electronic', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone'],
+    ['appliance', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'blender'],
+    ['food', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake'],
+    ['furniture', 'chair', 'couch', 'potted plant', 'bed', 'mirror', 'dining table', 'window', 'desk', 'toilet', 'door'],
+    ['book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush', 'hair brush'],
+    ['kitchen', 'bottle', 'plate', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl'],
+    ['accessory', 'hat', 'backpack', 'umbrella', 'shoe', 'eye glasses', 'handbag', 'tie', 'suitcase'],
+    ['animal', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'],
+    ['traffic light', 'fire hydrant', 'street sign', 'stop sign', 'parking meter', 'bench'],
+    ['person', 'man', 'woman', 'child', 'boy', 'girl'],
+    ['sports', 'frisbee', 'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket'],
+    ['vehicle', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat'],
+    ['ceiling', 'ceiling tile'],
+    ['floor', 'carpet', 'marble flooring', 'stone flooring', 'tile flooring', 'wood flooring'],
+    ['food', 'fruit', 'salad', 'vegetable'],
+    ['furniture', 'cabinet', 'counter', 'cupboard', 'desk', 'door', 'light', 'mirror', 'shelf', 'stairs', 'table'],
+    ['cardboard', 'metal', 'paper', 'plastic'],
+    ['textile', 'banner', 'blanket', 'cloth', 'clothes', 'curtain', 'mat', 'napkin', 'pillow', 'rug', 'towel'],
+    ['wall', 'brick wall', 'concrete wall', 'panel wall', 'stone wall', 'tile wall', 'wood wall'],
+    ['window', 'blind window'],
+    ['building', 'bridge', 'house', 'roof', 'skyscraper', 'tent'],
+    ['ground', 'dirt', 'gravel', 'mud', 'pavement', 'platform', 'playingfield', 'railroad', 'road', 'sand', 'snow'],
+    ['plant', 'branch', 'bush', 'flower', 'grass', 'leaves', 'moss', 'straw', 'tree'],
+    ['sky', 'clouds'],
+    ['hill', 'mountain', 'rock', 'stone', 'wood'],
+    ['structural', 'cage', 'fence', 'net', 'railing'],
+    ['water', 'fog', 'river', 'sea', 'ocean', 'waterdrops', 'lake']]
 
 def collate(samples, pad_idx, eos_idx):
     if len(samples) == 0:
@@ -299,7 +331,9 @@ class SegmentationDataset(OFADataset):
         if self.num_seg == 170+1:
             self.id2rawtext = [x for x in CLASSES_COCOF]
         elif self.num_seg == 26+1:
-            self.id2rawtext = [x for x in CLASSES_COCOC]
+            self.id2rawtext = CLASSES_COCOC_AUGMENTED
+            self.id2numtext = np.array([len(x) for x in CLASSES_COCOC_AUGMENTED])
+            self.id2offset = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(self.id2numtext)[:-1]])
         elif self.num_seg == 149+1:
             self.id2rawtext = [x for x in CLASSES_ADE]
         elif self.num_seg == 168+1:
@@ -314,7 +348,11 @@ class SegmentationDataset(OFADataset):
         self.image_corruption_name = self.cfg.image_corruption_name
         self.image_corruption_severity = self.cfg.image_corruption_severity
 
-        self.id2text = [self.encode_text(f" {x}") for x in self.id2rawtext]
+        if isinstance(self.id2rawtext[0], list):
+            self.id2text = [self.encode_text(f" {x}") for x in flatten(self.id2rawtext)]
+        else:
+            self.id2text = [self.encode_text(f" {x}") for x in self.id2rawtext]
+
         self.text_length = torch.tensor([len(x) for x in self.id2text])
 
         self.id2seg = np.array([f'<seg_{idx}>' for idx in range(self.num_seg + 1)])
@@ -428,11 +466,8 @@ class SegmentationDataset(OFADataset):
 
         # build 
         src_item_2 = None
-        if self.prompt_type in {'gt_seg', 'all'}:
-            if self.prompt_type == 'gt_seg' and self.split == 'train':
-                prompt_ids = gt_semantic_seg_downsampled.unique().tolist()
-            else:
-                prompt_ids = [idx for idx in range(self.num_seg)]
+        if self.prompt_type == 'all':
+            prompt_ids = [idx for idx in range(len(self.id2text))]
 
             if self.prompt_order == 'random':
                 np.random.shuffle(prompt_ids)
@@ -451,6 +486,10 @@ class SegmentationDataset(OFADataset):
             src_text += [self.eos_item]
 
             src_item = torch.cat(src_text)
+
+        elif self.prompt_type == 'gtseg':
+            raise NotImplementedError
+            # prompt_ids = gt_semantic_seg_downsampled.unique().tolist()
 
         elif self.prompt_type == 'seg':
             src_text = [self.bos_item]
@@ -514,9 +553,11 @@ class SegmentationDataset(OFADataset):
         
         elif self.fakeimage_type == 'gt_seg':
             fakeimage_ids = gt_semantic_seg_downsampled.tolist()
+            fakeimage_target = self.seg2code[fakeimage_ids]
             
         elif self.fakeimage_type == 'random':
             fakeimage_ids = np.random.choice(self.num_seg, size=1024, replace=True).tolist()
+            fakeimage_target = self.seg2code[fakeimage_ids]
 
         elif self.fakeimage_type.startswith('upsampling'):
             if self.fakeimage_type == 'upsampling':
@@ -530,8 +571,22 @@ class SegmentationDataset(OFADataset):
             sh, sw = torch.randint(l,r,(2,))
             sh, sw = sh.item(), sw.item()
             rand = np.random.choice(self.num_seg, size=sh*sw, replace=True)
+            if isinstance(self.id2rawtext[0], list):
+                extended_rand = []
+                for class_id in rand:
+                    numtext = self.id2numtext[class_id]
+                    randint = np.random.randint(numtext)
+
+                    extended_class_id = self.id2offset[class_id] + randint
+                    extended_rand.append(extended_class_id)
+                extended_rand = np.array(extended_rand)
+
+            extended_rand = torch.from_numpy(extended_rand).reshape(1, 1, sh, sw)
+            fakeimage_ids = self.downsample_gt_seg(extended_rand).reshape(-1).tolist()
+
             rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
-            fakeimage_ids = self.downsample_gt_seg(rand).reshape(-1).tolist()
+            upsample_rand = self.downsample_gt_seg(rand).reshape(-1).tolist()
+            fakeimage_target = self.seg2code[upsample_rand]
                 
         else:
             raise NotImplementedError
@@ -539,15 +594,11 @@ class SegmentationDataset(OFADataset):
         embedbag_ids = torch.cat([self.id2text[idx] for idx in fakeimage_ids])
         embedbag_offsets = torch.tensor([self.text_length[idx] for idx in fakeimage_ids], dtype=torch.long).cumsum(dim=0)
 
-        codes = self.seg2code[fakeimage_ids]
-        target = torch.cat([codes, self.eos_item])
-        prev_output_tokens = torch.cat([self.bos_item, codes])
+        target = torch.cat([fakeimage_target, self.eos_item])
+        prev_output_tokens = torch.cat([self.bos_item, fakeimage_target])
 
-        if self.fakeimage_prompt_type in {'gt_seg', 'all'}:
-            if self.fakeimage_prompt_type == 'gt_seg' and self.split == 'train':
-                prompt_ids = fakeimage_ids.unique().tolist()
-            else:
-                prompt_ids = [idx for idx in range(self.num_seg)]
+        if self.fakeimage_prompt_type == 'all':
+            prompt_ids = [idx for idx in range(len(self.id2text))]
 
             if self.prompt_order == 'random':
                 np.random.shuffle(prompt_ids)
@@ -565,6 +616,9 @@ class SegmentationDataset(OFADataset):
             src_text += [self.id2text[idx] for idx in prompt_ids]
             src_text += [self.eos_item]
             src_item = torch.cat(src_text)
+
+        elif self.fakeimage_prompt_type == 'gt_seg':
+            raise NotImplementedError
 
         elif self.fakeimage_prompt_type == 'seg':
             src_text = [self.bos_item]
