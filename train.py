@@ -186,9 +186,7 @@ def main(cfg: FairseqConfig) -> None:
 
     # Do validation first.
     valid_subsets = cfg.dataset.valid_subset.split(",")
-    valid_losses, should_stop = validate_and_save(
-            cfg, trainer, task, epoch_itr, valid_subsets, True
-        )
+    valid_losses = validate(cfg, trainer, task, epoch_itr, valid_subsets)
 
     train_meter = meters.StopwatchMeter()
     train_meter.start()
