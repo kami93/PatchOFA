@@ -765,45 +765,20 @@ class TransformerEncoder(FairseqEncoder):
         image_pos_embed = None
         image_pos_embed_2 = None
         if patch_images is not None:
-            device = src_tokens.device
-
-            image_embed = self.embed_images(patch_images)
-            (h, w) = image_embed_shape = image_embed.shape[-2:]
-            image_num_patches = h * w
-
-            image_padding_mask = patch_images.new_zeros((patch_images.size(0), image_num_patches)).bool()
-            image_position_ids = torch.arange(32).unsqueeze(0).expand(32, 32) + \
-                                torch.arange(32).unsqueeze(1) * self.args.image_bucket_size + 1
-            image_position_ids = image_position_ids.view(-1).to(device)
-            image_position_ids = image_position_ids[None, :].expand(patch_images.size(0), 1024) # image_num_patches_train = 1024
-
-            image_embed = image_embed.flatten(2).transpose(1, 2)
-
-            # orig_hw= self.orig_patch_image_size // 16
-            old_image_position_ids = torch.arange(32).unsqueeze(0).expand(32, 32) + \
-                                        torch.arange(32).unsqueeze(1) * self.args.image_bucket_size + 1
-            old_image_position_ids = old_image_position_ids.to(device)
-            old_image_pos_embed = self.embed_image_positions(old_image_position_ids)
-            old_image_pos_embed = old_image_pos_embed.reshape(1, 32, 32, -1).permute(0, 3, 1, 2)
-            
-            image_pos_embed = F.interpolate(old_image_pos_embed, size=image_embed_shape, mode='bilinear')
-            image_pos_embed = image_pos_embed.permute(0, 2, 3, 1).reshape(1, image_num_patches, -1)
-            image_pos_embed = image_pos_embed.expand(patch_images.size(0), -1, -1)
-
+            image_embed, image_num_patches, image_padding_mask, image_position_ids, image_pos_embed, image_embed_shape = \
+                self.get_patch_images_info(patch_images, sample_patch_num, src_tokens.device)
             image_padding_mask[~patch_masks] = True            
             
-        # if patch_images_2 is not None:
-        #     image_embed_2, image_num_patches_2, image_padding_mask_2, image_position_ids_2, image_pos_embed_2 = \
-        #         self.get_patch_images_info(patch_images_2, sample_patch_num, src_tokens.device)
-        #     image_padding_mask_2[~patch_masks] = True
+        if patch_images_2 is not None:
+            image_embed_2, image_num_patches_2, image_padding_mask_2, image_position_ids_2, image_pos_embed_2 = \
+                self.get_patch_images_info(patch_images_2, sample_patch_num, src_tokens.device)
+            image_padding_mask_2[~patch_masks] = True
 
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
         if patch_images is not None:
             encoder_padding_mask = torch.cat([image_padding_mask, encoder_padding_mask], dim=1)
-        
-        # if patch_images_2 is not None:
-        #     encoder_padding_mask = torch.cat([image_padding_mask_2, encoder_padding_mask], dim=1)
-        
+        if patch_images_2 is not None:
+            encoder_padding_mask = torch.cat([image_padding_mask_2, encoder_padding_mask], dim=1)
         has_pads = (src_tokens.device.type == "xla" or encoder_padding_mask.any())
 
         pos_embed = self.embed_positions(utils.new_arange(src_tokens))
@@ -811,7 +786,7 @@ class TransformerEncoder(FairseqEncoder):
             src_tokens, image_embed, image_embed_2, token_embeddings,
             pos_embed, image_pos_embed, image_pos_embed_2
         )
-
+        
         # account for padding while computing the representation
         if has_pads:
             x = x * (1 - encoder_padding_mask.unsqueeze(-1).type_as(x))
@@ -846,36 +821,14 @@ class TransformerEncoder(FairseqEncoder):
         for idx, layer in enumerate(self.layers):
             self_attn_bias = abs_pos_bias.clone()
             self_attn_bias[:, :, -src_tokens.size(1):, -src_tokens.size(1):] += self.get_rel_pos_bias(src_tokens, idx)
-
-            bsz, train_seq_len = image_position_ids.shape
-            rp_bucket_size = self.image_rp_bucket.size(1)
-
-            rp_bucket = self.image_rp_bucket.unsqueeze(0).expand(
-                bsz, rp_bucket_size, rp_bucket_size
-            ).gather(1, image_position_ids[:, :, None].expand(bsz, train_seq_len, rp_bucket_size)
-            ).gather(2, image_position_ids[:, None, :].expand(bsz, train_seq_len, train_seq_len))
-
-            image_res_pos_bias = F.embedding(rp_bucket, self.image_rel_pos_table_list[idx].weight)
-
-            image_res_pos_bias = rearrange(image_res_pos_bias, 'b (h1 w1) (h2 w2) d -> (b h1 w1) d h2 w2', h1=32, w1=32, h2=32, w2=32)
-            image_res_pos_bias = F.interpolate(image_res_pos_bias, size=image_embed_shape, mode='bilinear')
-            
-            image_res_pos_bias = rearrange(image_res_pos_bias, '(b h1 w1) d h2 w2 -> (b h2 w2) d h1 w1', h1=32, w1=32, h2=image_embed_shape[0], w2=image_embed_shape[1])
-            image_res_pos_bias = F.interpolate(image_res_pos_bias, size=image_embed_shape, mode='bilinear')
-
-            image_res_pos_bias = rearrange(image_res_pos_bias, '(b h2 w2) d h1 w1 -> b d (h1 w1) (h2 w2)', h1=image_embed_shape[0], w1=image_embed_shape[1], h2=image_embed_shape[0], w2=image_embed_shape[1])
-            
-            self_attn_bias[:, :, :x.size(0) - src_tokens.size(1), :x.size(0) - src_tokens.size(1)] += image_res_pos_bias
-
-            # if patch_images_2 is not None:
-            #     self_attn_bias[:, :, :image_num_patches_2, :image_num_patches_2] += \
-            #         self.get_image_rel_pos_bias(image_position_ids_2, idx)
-            #     self_attn_bias[:, :, image_num_patches_2:image_num_patches_2+image_num_patches, image_num_patches_2:image_num_patches_2+image_num_patches] += \
-            #         self.get_image_rel_pos_bias(image_position_ids, idx)
-            # elif patch_images is not None:
-            #     self_attn_bias[:, :, :x.size(0) - src_tokens.size(1), :x.size(0) - src_tokens.size(1)] += \
-            #         self.get_image_rel_pos_bias(image_position_ids, idx)
-
+            if patch_images_2 is not None:
+                self_attn_bias[:, :, :image_num_patches_2, :image_num_patches_2] += \
+                    self.get_image_rel_pos_bias(image_position_ids_2, idx)
+                self_attn_bias[:, :, image_num_patches_2:image_num_patches_2+image_num_patches, image_num_patches_2:image_num_patches_2+image_num_patches] += \
+                    self.get_image_rel_pos_bias(image_position_ids, idx)
+            elif patch_images is not None:
+                self_attn_bias[:, :, :x.size(0) - src_tokens.size(1), :x.size(0) - src_tokens.size(1)] += \
+                    self.get_image_rel_pos_bias(image_position_ids, idx)
             self_attn_bias = self_attn_bias.reshape(-1, self_attn_bias.size(2), self_attn_bias.size(2))
             if self.args.encoder_prompt:
                 if self.args.encoder_prompt_type != "prompt":
