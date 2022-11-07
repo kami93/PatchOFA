@@ -336,6 +336,7 @@ class SegCriterionV3(FairseqCriterion):
         self.unsupervised_segmentation = resolve_str_true_false(unsupervised_segmentation)
         self.full_context_alignment = resolve_str_true_false(full_context_alignment)
         self.init_seg_with_text = resolve_str_true_false(init_seg_with_text)
+        self.sliding_inference = True
         
         self.mask_cosine_criterion = mask_cosine_criterion
         self.mask_threshold_criterion = mask_threshold_criterion
@@ -406,12 +407,68 @@ class SegCriterionV3(FairseqCriterion):
             seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
             loss = (1.0 - self.effective_alpha) * labeled_loss + self.effective_alpha * seg_loss
         
-        else:
+        elif model.training:
             net_output = model(**sample["net_input"])
             labeled_loss = net_output[0].new_zeros(size=(1, ))
             seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
             loss = seg_loss
+        
+        else:
+            if self.sliding_inference:
+                patch_images = sample["net_input"]["patch_images"]
+                (h, w) = patch_images.shape[-2:]
+                
+                num_h_slice = math.ceil(h / 512)
+                num_w_slice = math.ceil(w / 512)
+                
+                h_offset_list = torch.linspace(0, h-512, steps=num_h_slice, dtype=torch.int).tolist()
+                w_offset_list = torch.linspace(0, w-512, steps=num_w_slice, dtype=torch.int).tolist()
 
+                if num_h_slice == 1:
+                    h_cut_per_region = [(0, 0)]
+                else:
+                    h_overlap = num_h_slice * 512 - h
+                    num_h_overlap_region = num_h_slice - 1
+                    h_cut_per_region = [h_overlap//num_h_overlap_region if h_i >= (h_overlap % num_h_overlap_region) else h_overlap//num_h_overlap_region+1 for h_i in range(num_h_overlap_region)]
+                    h_cut_per_region = [(math.floor(h_cut/2), math.ceil(h_cut/2)) for h_cut in h_cut_per_region]
+                
+                if num_w_slice == 1:
+                    w_cut_per_region = [(0, 0)]
+                else:
+                    w_overlap = num_w_slice * 512 - w
+                    num_w_overlap_region = num_w_slice - 1
+                    w_cut_per_region = [w_overlap//num_w_overlap_region if w_i >= (w_overlap % num_w_overlap_region) else w_overlap//num_w_overlap_region+1 for w_i in range(num_w_overlap_region)]
+                    w_cut_per_region = [(math.floor(w_cut/2), math.ceil(w_cut/2)) for w_cut in w_cut_per_region]
+
+                x_list = []
+                for h_i in range(num_h_slice):
+                    x_list_w = []
+                    for w_i in range(num_w_slice):
+                        h_offset = h_offset_list[h_i]
+                        w_offset = w_offset_list[w_i]
+                        
+                        _patch_images = patch_images[..., h_offset:h_offset+512, w_offset:w_offset+512]
+                        
+                        sample["net_input"]["patch_images"] = _patch_images
+                        _x, extra = model(**sample["net_input"])
+                        
+                        x_list_w.append(_x)
+                    x_list.append(x_list_w)
+
+                net_output = (x_list, extra)
+
+                extra['h_cut_per_region'] = h_cut_per_region
+                extra['w_cut_per_region'] = w_cut_per_region
+                extra['num_h_slice'] = num_h_slice
+                extra['num_w_slice'] = num_w_slice
+
+            
+            else:
+                net_output = model(**sample["net_input"])
+            
+            labeled_loss = torch.zeros(size=(1, ), device='cuda')
+            seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
+            loss = seg_loss
         sample_size = (
             sample["target"].size(0) if self.sentence_avg else ntokens
         )
@@ -733,9 +790,54 @@ class SegCriterionV3(FairseqCriterion):
         target = sample.get("target")
 
         (hp, wp) = extra['encoder_returns']['image_embed_shape'][0]
-        (h, w) = extra['encoder_returns']['patch_images'][0].shape[-2:]
+        (h, w) = sample['net_input']['patch_images'].shape[-2:]
 
-        classifier_scores = self.upsample_logits(classifier_scores_lowres, hp=hp, wp=wp, h=h, w=w) # bilinear upsample
+        if isinstance(classifier_scores_lowres, list):
+            h_cut_per_region = extra['h_cut_per_region']
+            w_cut_per_region = extra['w_cut_per_region']
+            num_h_slice = extra['num_h_slice']
+            num_w_slice = extra['num_w_slice']
+            
+            _classifier_scores_h_list = []
+            for h_i in range(num_h_slice):
+                _classifier_scores_w_list = []
+                for w_i in range(num_w_slice):
+                    _classifier_scores_lowres = classifier_scores_lowres[h_i][w_i]
+                    _classifier_scores = self.upsample_logits(_classifier_scores_lowres, hp=hp, wp=wp, h=h, w=w) # bilinear upsample
+                    
+                    _classifier_scores_image, _classifier_scores_eos = _classifier_scores[:, :-1], _classifier_scores[:, -1:]
+                    _classifier_scores_image = rearrange(_classifier_scores_image, 'b (h w) d -> b h w d', h=512, w=512)
+                    
+                    if h_i == 0:
+                        _classifier_scores_image = _classifier_scores_image[:, :512-h_cut_per_region[h_i][0], :, :]
+                    
+                    elif h_i == num_h_slice-1:
+                        _classifier_scores_image = _classifier_scores_image[:, h_cut_per_region[h_i-1][1]:, :, :]
+                    
+                    else:
+                        _classifier_scores_image = _classifier_scores_image[:, h_cut_per_region[h_i-1][1]:512-h_cut_per_region[h_i][0], :, :]
+                    
+                    if w_i == 0:
+                        _classifier_scores_image = _classifier_scores_image[:, :, :512-w_cut_per_region[w_i][0], :]
+                    
+                    elif w_i == num_w_slice-1:
+                        _classifier_scores_image = _classifier_scores_image[:, :, w_cut_per_region[w_i-1][1]:, :]
+                    
+                    else:
+                        _classifier_scores_image = _classifier_scores_image[:, :, w_cut_per_region[w_i-1][1]:512-w_cut_per_region[w_i][0], :]
+            
+                    _classifier_scores_w_list.append(_classifier_scores_image)
+                    
+                _classifier_scores_w = torch.cat(_classifier_scores_w_list, dim=2)
+                _classifier_scores_h_list.append(_classifier_scores_w)
+            
+            _classifier_scores_h = torch.cat(_classifier_scores_h_list, dim=1)
+            _classifier_scores_h = rearrange(_classifier_scores_h, 'b h w d -> b (h w) d')
+            
+            classifier_scores = torch.cat((_classifier_scores_h, _classifier_scores_eos), dim=1)
+        
+        else:
+            classifier_scores = self.upsample_logits(classifier_scores_lowres, hp=hp, wp=wp, h=h, w=w) # bilinear upsample
 
         target_shape = target.shape
         assert target_shape == classifier_scores.shape[:-1]

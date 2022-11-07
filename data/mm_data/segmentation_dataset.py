@@ -280,10 +280,7 @@ class SegmentationDataset(OFADataset):
                                                           flip=False,
                                                           transforms=[dict(type='Resize', keep_ratio=True),
                                                                       dict(type='RandomFlip')])
-            
-            # self.image_transform = Resize(img_scale=(512, 512), keep_ratio=False)
-            # self.downsample_gt_seg = transforms.Resize(32, transforms.InterpolationMode.NEAREST)
-            # self.downsample_gt_seg = transforms.Resize(32, transforms.InterpolationMode.NEAREST)
+            self.downsample_gt_seg = transforms.Resize((32, 32), transforms.InterpolationMode.NEAREST)
         
         prompt_prefix=self.cfg.prompt_prefix
         if len(prompt_prefix):
@@ -394,10 +391,6 @@ class SegmentationDataset(OFADataset):
             prev_output_item = torch.cat([self.bos_item, seg_ids_downsampled])
 
         else:
-            # multiscale_images = self.multiscale_transform(results)
-            
-            # img_list = multiscale_images.pop('img')
-            # img = img_list[0]
             img_dict = self.image_transform(results)
             img = img_dict.pop('img')[0]
             img = img[:, :, ::-1].copy() # to RGB
@@ -414,7 +407,11 @@ class SegmentationDataset(OFADataset):
             gt_semantic_seg = torch.from_numpy(gt_semantic_seg.astype(np.int64))
             
             downsampled_target=None
-            prev_output_item=self.bos_item
+            # prev_output_item=self.bos_item
+            gt_semantic_seg_downsampled = self.downsample_gt_seg(gt_semantic_seg.unsqueeze(0)).flatten()
+            seg_ids_downsampled = self.seg2code[gt_semantic_seg_downsampled]
+            # downsampled_target = torch.cat([seg_ids_downsampled, self.eos_item])
+            prev_output_item = torch.cat([self.bos_item, seg_ids_downsampled])
 
         seg_ids = self.seg2code[gt_semantic_seg.flatten()]
         target = torch.cat([seg_ids, self.eos_item])
