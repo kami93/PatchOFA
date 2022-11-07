@@ -169,9 +169,11 @@ def collate(samples, pad_idx, eos_idx):
         tgt_lengths = torch.LongTensor([s["target"].ne(pad_idx).long().sum() for s in samples])
         ntokens = tgt_lengths.sum().item()
 
+        prev_output_tokens = None
         if samples[0].get("prev_output_tokens", None) is not None:
             prev_output_tokens = merge("prev_output_tokens")
 
+        downsampled_target = None
         if samples[0].get("downsampled_target", None) is not None:
             downsampled_target = merge("downsampled_target")
 
@@ -274,13 +276,14 @@ class SegmentationDataset(OFADataset):
 
 
         else:
-            # self.multiscale_transform = MultiScaleFlipAug(img_scale=(2048, 512),
-            #                                               flip=False,
-            #                                               transforms=[dict(type='Resize', keep_ratio=True),
-            #                                                           dict(type='RandomFlip')])
+            self.image_transform = MultiScaleFlipAug(img_scale=(2048, 512),
+                                                          flip=False,
+                                                          transforms=[dict(type='Resize', keep_ratio=True),
+                                                                      dict(type='RandomFlip')])
             
-            self.image_transform = Resize(img_scale=(512, 512), keep_ratio=False)
-            self.downsample_gt_seg = transforms.Resize(32, transforms.InterpolationMode.NEAREST)
+            # self.image_transform = Resize(img_scale=(512, 512), keep_ratio=False)
+            # self.downsample_gt_seg = transforms.Resize(32, transforms.InterpolationMode.NEAREST)
+            # self.downsample_gt_seg = transforms.Resize(32, transforms.InterpolationMode.NEAREST)
         
         prompt_prefix=self.cfg.prompt_prefix
         if len(prompt_prefix):
@@ -384,14 +387,19 @@ class SegmentationDataset(OFADataset):
             
             gt_semantic_seg = aug_dict.pop('gt_semantic_seg')
             gt_semantic_seg = torch.from_numpy(gt_semantic_seg.astype(np.int64))
-            
+
+            gt_semantic_seg_downsampled = self.downsample_gt_seg(gt_semantic_seg.unsqueeze(0)).flatten()
+            seg_ids_downsampled = self.seg2code[gt_semantic_seg_downsampled]
+            downsampled_target = torch.cat([seg_ids_downsampled, self.eos_item])
+            prev_output_item = torch.cat([self.bos_item, seg_ids_downsampled])
+
         else:
             # multiscale_images = self.multiscale_transform(results)
             
             # img_list = multiscale_images.pop('img')
             # img = img_list[0]
             img_dict = self.image_transform(results)
-            img = img_dict.pop('img')
+            img = img_dict.pop('img')[0]
             img = img[:, :, ::-1].copy() # to RGB
 
             if self.image_corruption_name != 'none':
@@ -402,14 +410,15 @@ class SegmentationDataset(OFADataset):
 
             # gt_semantic_seg_list = multiscale_images.pop('gt_semantic_seg')
             # gt_semantic_seg = gt_semantic_seg_list[0]
-            
-            gt_semantic_seg = img_dict.pop('gt_semantic_seg')
+            gt_semantic_seg = img_dict.pop('gt_semantic_seg')[0]
             gt_semantic_seg = torch.from_numpy(gt_semantic_seg.astype(np.int64))
+            
+            downsampled_target=None
+            prev_output_item=self.bos_item
 
-        h, w = gt_semantic_seg.shape[:2]
-        if h < 512 or w < 512:
-            import pdb; pdb.set_trace()
-            abc = 1
+        seg_ids = self.seg2code[gt_semantic_seg.flatten()]
+        target = torch.cat([seg_ids, self.eos_item])
+
 
         text_target = None
         # text_target = self.seg2code[:150].repeat_interleave(repeats=self.text_length, dim=0)
@@ -419,14 +428,6 @@ class SegmentationDataset(OFADataset):
         #     fill_idx = self.text_length[:150].cumsum(dim=0)-1
         #     text_target = text_target.new_full(size=text_target.size(), fill_value=self.pad, dtype=torch.long)
         #     text_target[fill_idx] = self.seg2code[:150]
-            
-        gt_semantic_seg_downsampled = self.downsample_gt_seg(gt_semantic_seg.unsqueeze(0)).flatten()
-        seg_ids = self.seg2code[gt_semantic_seg.flatten()]
-        seg_ids_downsampled = self.seg2code[gt_semantic_seg_downsampled]
-        
-        prev_output_item = torch.cat([self.bos_item, seg_ids_downsampled])
-        downsampled_target = torch.cat([seg_ids_downsampled, self.eos_item])
-        target = torch.cat([seg_ids, self.eos_item])
 
         # build 
         src_item_2 = None

@@ -548,16 +548,19 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             prompt_tokens = None
             prompt_padding_mask = None
             prompt_kv_list = None
+
+            bsz, seq_len = encoder_out['image_embed_before_proj'][0].shape[:2]
+            device = encoder_out['image_embed_before_proj'][0].device
+
             if self.args.decoder_prompt:
-                bsz, seq_len = prev_output_tokens.shape[0], prev_output_tokens.shape[1]
                 if self.args.decoder_prompt_type in ("prefix"):
                     prompt_tokens = torch.arange(
                         0, self.args.decoder_prompt_length).to(
-                        prev_output_tokens.device)
+                        device)
                     prompt_tokens = prompt_tokens.unsqueeze(0).expand(bsz, -1)
-                    prompt_padding_mask = torch.zeros_like(prompt_tokens).to(prompt_tokens.device)
+                    prompt_padding_mask = torch.zeros_like(prompt_tokens).to(device)
                 prompt_kv_list = self.get_decoder_prompt(prompt_tokens)
-            bs, slen = prev_output_tokens.size()
+
             if alignment_layer is None:
                 alignment_layer = self.num_layers - 1
 
@@ -566,23 +569,20 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if encoder_out is not None and len(encoder_out["encoder_out"]) > 0:
                 enc = encoder_out["encoder_out"][0]
                 assert (
-                    enc.size()[1] == bs
-                ), f"Expected enc.shape == (t, {bs}, c) got {enc.shape}"
+                    enc.size()[1] == bsz
+                ), f"Expected enc.shape == (t, {bsz}, c) got {enc.shape}"
             if encoder_out is not None and len(encoder_out["encoder_padding_mask"]) > 0:
                 padding_mask = encoder_out["encoder_padding_mask"][0]
 
-            bsz = prev_output_tokens.size(0)
             h, w = encoder_out['image_embed_shape'][0]
             tgt_len = h * w + 1
             
             # embed tokens and positions
             bos = prev_output_tokens[:, :1]
-            
-            
             if self.decoder_input_type == 'encoder_input':
                 image_embed_before_scale = encoder_out["image_embed_before_scale"][0]
             elif self.decoder_input_type == 'encoder_output':
-                image_embed_before_scale = rearrange(encoder_out["encoder_out"][0][:1024], 'l b d -> b l d')
+                image_embed_before_scale = rearrange(encoder_out["encoder_out"][0][:seq_len], 'l b d -> b l d')
 
             if self.no_grad_image:
                 image_embed_before_scale = image_embed_before_scale.detach() # STOP_GRAD
@@ -592,9 +592,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             x = torch.cat([self.embed_tokens(bos), image_embed_before_scale], dim=1)
             x = x * self.embed_scale
             
-            # token_position_idx = utils.new_arange(prev_output_tokens)
-            old_token_position_idx = torch.arange(1025, dtype=prev_output_tokens.dtype, device=prev_output_tokens.device)
-            old_token_position_idx = old_token_position_idx.unsqueeze(0).expand(bsz, -1)
+            old_token_position_idx = torch.arange(1025, device=device).unsqueeze(0).expand(bsz, -1)
             old_tgt_pos_embed = self.embed_seg_positions(old_token_position_idx)
 
             old_tgt_pos_embed_bos, old_tgt_pos_embed_seg = torch.split(old_tgt_pos_embed, [1, 1024], dim=1)
@@ -604,19 +602,32 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             tgt_pos_embed_seg = rearrange(tgt_pos_embed_seg, 'b c h w -> b (h w) c')
             tgt_pos_embed = torch.cat([old_tgt_pos_embed_bos, tgt_pos_embed_seg], dim=1)
             
-            tgt_pos_embed = tgt_pos_embed[:, :prev_output_tokens.size(1)]
-
             # self attn position bias
-            self_abs_pos_bias = self.get_pos_info(prev_output_tokens, tgt_pos_embed, use_seg=True)
+            tgt_pos_embed = self.seg_pos_ln(tgt_pos_embed)
+            pos_q = self.self_pos_q_linear(tgt_pos_embed).view(
+                bsz, tgt_len, self.num_attention_heads, -1
+            ).transpose(1, 2) * self.pos_scaling
+            pos_k = self.self_pos_k_linear(tgt_pos_embed).view(
+                bsz, tgt_len, self.num_attention_heads, -1
+            ).transpose(1, 2)
+            self_abs_pos_bias = torch.matmul(pos_q, pos_k.transpose(2, 3))
 
             # cross attn position bias
             src_pos_embed = encoder_out['position_embeddings'][0]
-            cross_abs_pos_bias = self.get_pos_info(prev_output_tokens, tgt_pos_embed, src_pos_embed=src_pos_embed, use_seg=True)
+
+            src_len = src_pos_embed.size(1)
+            pos_q = self.cross_pos_q_linear(tgt_pos_embed).view(
+                bsz, tgt_len, self.num_attention_heads, -1
+            ).transpose(1, 2) * self.pos_scaling
+            pos_k = self.cross_pos_k_linear(src_pos_embed).view(
+                bsz, src_len, self.num_attention_heads, -1
+            ).transpose(1, 2)
+            cross_abs_pos_bias = torch.matmul(pos_q, pos_k.transpose(2, 3))
             cross_abs_pos_bias = cross_abs_pos_bias.reshape(-1, *cross_abs_pos_bias.size()[-2:])
 
-            all_prev_output_tokens = prev_output_tokens.clone()
+            all_x = x.clone()
             if incremental_state is not None:
-                prev_output_tokens = prev_output_tokens[:, -1:]
+                x = x[:, -1:]
                 cross_abs_pos_bias = cross_abs_pos_bias[:, -1:, :]
                 tgt_pos_embed = tgt_pos_embed[:, -1:, :]
             
@@ -638,10 +649,10 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             x = x.transpose(0, 1)
 
             self_attn_padding_mask: Optional[Tensor] = None
-            if self.cross_self_attention or prev_output_tokens.eq(self.padding_idx).any():
-                self_attn_padding_mask = prev_output_tokens.eq(self.padding_idx)
-                if prompt_padding_mask is not None:
-                    self_attn_padding_mask = torch.cat([prompt_padding_mask, self_attn_padding_mask], dim=1)
+            # if self.cross_self_attention or prev_output_tokens.eq(self.padding_idx).any():
+            #     self_attn_padding_mask = prev_output_tokens.eq(self.padding_idx)
+            #     if prompt_padding_mask is not None:
+            #         self_attn_padding_mask = torch.cat([prompt_padding_mask, self_attn_padding_mask], dim=1)
 
             # decoder layers
             attn: Optional[Tensor] = None
@@ -656,8 +667,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 else:
                     self_attn_mask = None
                 self_attn_bias = self_abs_pos_bias.clone()
-        
-                old_rel_pos_bias = self.get_seg_rel_pos_bias(all_prev_output_tokens, idx).unsqueeze(0)
+
+                old_rel_pos_bias = F.embedding(self.seg_rp_bucket, self.seg_rel_pos_table_list[idx].weight)
+                old_rel_pos_bias = old_rel_pos_bias.permute([2, 0, 1]).contiguous().unsqueeze(0)
                 old_rel_pos_bias = rearrange(old_rel_pos_bias, 'b c hw1 hw2 -> (b hw2) c hw1')
                 old_rel_pos_bias_bos, old_rel_pos_bias_seg = torch.split(old_rel_pos_bias, [1, 1024], dim=-1)
                 
@@ -680,8 +692,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 rel_pos_bias = torch.cat([old_rel_pos_bias_bos, old_rel_pos_bias_seg], dim=-1)
                 
                 rel_pos_bias = rearrange(rel_pos_bias, '(b hw1) c hw2 -> b c hw1 hw2', hw1=tgt_len, hw2=tgt_len)
-                
-                self_attn_bias += rel_pos_bias[..., :prev_output_tokens.size(1), :prev_output_tokens.size(1)]
+                self_attn_bias += rel_pos_bias
                 
                 self_attn_bias = self_attn_bias.reshape(-1, *self_attn_bias.size()[-2:])
                 if incremental_state is not None:

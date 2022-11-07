@@ -442,10 +442,10 @@ class SegCriterionV3(FairseqCriterion):
         return loss, sample_size, logging_output
 
     
-    def upsample_logits(self, logits):
+    def upsample_logits(self, logits, hp=32, wp=32, h=512, w=512):
         logits_ = logits[:, :-1]
-        logits_ = rearrange(logits_, 'b (h w) d -> b d h w', h=32, w=32)
-        logits_ = resize(logits_, size=(512, 512), mode='bilinear', align_corners=False)
+        logits_ = rearrange(logits_, 'b (h w) d -> b d h w', h=hp, w=wp)
+        logits_ = resize(logits_, size=(h, w), mode='bilinear', align_corners=False)
         logits_ = rearrange(logits_, 'b d h w -> b (h w) d')
         logits = torch.cat([logits_, logits[:, -1:]], dim=1)
         
@@ -717,23 +717,26 @@ class SegCriterionV3(FairseqCriterion):
 
     def compute_loss(self, model, net_output, sample, update_num, reduce=True, ema_model=None):
         classifier_scores_lowres, extra = net_output
+        metrics = dict()
 
         target_lowres = sample.get("downsampled_target")
-        sample_masks_lowres = None # ignoring idx mask for "sample" dimension
+        if target_lowres is not None:
+            classifier_scores_lowres = classifier_scores_lowres.float()
+            target_lowres_shape = target_lowres.shape
+            assert target_lowres_shape == classifier_scores_lowres.shape[:-1]
 
-        classifier_scores_lowres = classifier_scores_lowres.float()
-        target_lowres_shape = target_lowres.shape
-        assert target_lowres_shape == classifier_scores_lowres.shape[:-1]
-
-        sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+self.output_classes))
-        eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
-        sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
+            sample_masks_lowres = torch.logical_or(target_lowres == self.padding_idx, target_lowres == (self.seg_id_offset+self.output_classes))
+            eos_masks_lowres = target_lowres.eq(self.task.tgt_dict.eos())
+            sample_masks_lowres = torch.logical_or(sample_masks_lowres, eos_masks_lowres)
 
         # calculate upscaled versions
         target = sample.get("target")
-        sample_masks = None
 
-        classifier_scores = self.upsample_logits(classifier_scores_lowres) # bilinear upsample
+        (hp, wp) = extra['encoder_returns']['image_embed_shape'][0]
+        (h, w) = extra['encoder_returns']['patch_images'][0].shape[-2:]
+
+        classifier_scores = self.upsample_logits(classifier_scores_lowres, hp=hp, wp=wp, h=h, w=w) # bilinear upsample
+
         target_shape = target.shape
         assert target_shape == classifier_scores.shape[:-1]
 
@@ -742,35 +745,33 @@ class SegCriterionV3(FairseqCriterion):
         sample_masks = torch.logical_or(sample_masks, eos_masks)
 
         # apply masking to targets
-        target_lowres = target_lowres[~sample_masks_lowres] - self.seg_id_offset
         target = target[~sample_masks] - self.seg_id_offset
-
-        ntokens = 1
-
-        classifier_scores_lowres = classifier_scores_lowres[~sample_masks_lowres]
         classifier_scores = classifier_scores[~sample_masks]
+
+        area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_scores.detach(), target.detach())
+        metrics["area_intersect"] = area_intersect
+        metrics["area_pred_label"] = area_pred_label
+        metrics["area_label"] = area_label
+        metrics["area_union"] = area_union
+
+        if target_lowres is not None:
+            target_lowres = target_lowres[~sample_masks_lowres] - self.seg_id_offset
+            classifier_scores_lowres = classifier_scores_lowres[~sample_masks_lowres]
+
+            area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_scores_lowres.detach(), target_lowres.detach())
+            metrics["area_intersect_lowres"] = area_intersect_lowres
+            metrics["area_pred_label_lowres"] = area_pred_label_lowres
+            metrics["area_label_lowres"] = area_label_lowres
+            metrics["area_union_lowres"] = area_union_lowres
 
         assert self.student_temperature == 1.0 # to avoid mistakes...
         if self.upscale_lprobs:
             loss = F.cross_entropy(classifier_scores / self.student_temperature, target.detach(), label_smoothing=self.eps) # just for display
         else:
             loss = F.cross_entropy(classifier_scores_lowres / self.student_temperature, target_lowres.detach(), label_smoothing=self.eps) # just for display
-
-        area_intersect_lowres, area_pred_label_lowres, area_label_lowres, area_union_lowres = self.compute_metric(classifier_scores_lowres.detach(), target_lowres.detach())
-        area_intersect, area_pred_label, area_label, area_union = self.compute_metric(classifier_scores.detach(), target.detach())
-
-        metrics = dict()
+        
         metrics["nll_loss"] = loss
-
-        metrics["area_intersect_lowres"] = area_intersect_lowres
-        metrics["area_pred_label_lowres"] = area_pred_label_lowres
-        metrics["area_label_lowres"] = area_label_lowres
-        metrics["area_union_lowres"] = area_union_lowres
-
-        metrics["area_intersect"] = area_intersect
-        metrics["area_pred_label"] = area_pred_label
-        metrics["area_label"] = area_label
-        metrics["area_union"] = area_union
+        ntokens = 1
 
         return loss, metrics, ntokens
 
@@ -919,16 +920,6 @@ class SegCriterionV3(FairseqCriterion):
         abs_center_max = logging_outputs[0].get("abs_center_max", 0.0)
         abs_center_mean = logging_outputs[0].get("abs_center_mean", 0.0)
         
-        area_intersect_sum = sum(log.get("area_intersect", 0) for log in logging_outputs)
-        area_pred_label_sum = sum(log.get("area_pred_label", 0) for log in logging_outputs)
-        area_label_sum = sum(log.get("area_label", 0) for log in logging_outputs)
-        area_union_sum = sum(log.get("area_union", 0) for log in logging_outputs)
-
-        area_intersect_lowres_sum = sum(log.get("area_intersect_lowres", 0) for log in logging_outputs)
-        area_pred_label_lowres_sum = sum(log.get("area_pred_label_lowres", 0) for log in logging_outputs)
-        area_label_lowres_sum = sum(log.get("area_label_lowres", 0) for log in logging_outputs)
-        area_union_lowres_sum = sum(log.get("area_union_lowres", 0) for log in logging_outputs)
-
         metrics.log_scalar(
             "loss", loss_sum / sample_size, sample_size, round=3
         )
@@ -971,74 +962,89 @@ class SegCriterionV3(FairseqCriterion):
         metrics.log_scalar(
             "abs_center_mean", abs_center_mean / sample_size, 1, round=3
         )
-        metrics.log_scalar_sum(
-            "_area_intersect", area_intersect_sum, 1
-        )
-        metrics.log_scalar_sum(
-            "_area_pred_label", area_pred_label_sum, 1
-        )
-        metrics.log_scalar_sum(
-            "_area_label", area_label_sum, 1
-        )
-        metrics.log_scalar_sum(
-            "_area_union", area_union_sum, 1
-        )
-        metrics.log_scalar_sum(
-            "_area_intersect_lowres", area_intersect_lowres_sum, 1
-        )
-        metrics.log_scalar_sum(
-            "_area_pred_label_lowres", area_pred_label_lowres_sum, 1
-        )
-        metrics.log_scalar_sum(
-            "_area_label_lowres", area_label_lowres_sum, 1
-        )
-        metrics.log_scalar_sum(
-            "_area_union_lowres", area_union_lowres_sum, 1
-        )
 
-        def compute_all_acc(meters):
-            all_acc = meters['_area_intersect'].sum.sum() / meters['_area_pred_label'].sum.sum()
-            all_acc = all_acc if isinstance(all_acc, float) else all_acc.item()
+        if "area_intersect_lowres" in logging_outputs[0]:
+            area_intersect_lowres_sum = sum(log.get("area_intersect_lowres", 0) for log in logging_outputs)
+            area_pred_label_lowres_sum = sum(log.get("area_pred_label_lowres", 0) for log in logging_outputs)
+            area_label_lowres_sum = sum(log.get("area_label_lowres", 0) for log in logging_outputs)
+            area_union_lowres_sum = sum(log.get("area_union_lowres", 0) for log in logging_outputs)
+
+            metrics.log_scalar_sum(
+                "_area_intersect_lowres", area_intersect_lowres_sum, 1
+            )
+            metrics.log_scalar_sum(
+                "_area_pred_label_lowres", area_pred_label_lowres_sum, 1
+            )
+            metrics.log_scalar_sum(
+                "_area_label_lowres", area_label_lowres_sum, 1
+            )
+            metrics.log_scalar_sum(
+                "_area_union_lowres", area_union_lowres_sum, 1
+            )
             
-            return round(all_acc, 4)
+            def compute_all_acc_lowres(meters):
+                all_acc = meters['_area_intersect_lowres'].sum.sum() / meters['_area_pred_label_lowres'].sum.sum()
+                all_acc = all_acc if isinstance(all_acc, float) else all_acc.item()
+                
+                return round(all_acc, 4)
 
-        def compute_mean_iou(meters):
-            miou = torch.nanmean(meters['_area_intersect'].sum / (meters['_area_union'].sum))
-            miou = miou if isinstance(miou, float) else miou.item()
-            
-            return round(miou, 4)
+            def compute_mean_iou_lowres(meters):
+                miou = torch.nanmean(meters['_area_intersect_lowres'].sum / (meters['_area_union_lowres'].sum))
+                miou = miou if isinstance(miou, float) else miou.item()
+                
+                return round(miou, 4)
 
-        def compute_mean_acc(meters):
-            macc = torch.nanmean(meters['_area_intersect'].sum / (meters['_area_label'].sum)) # nanmean
-            macc = macc if isinstance(macc, float) else macc.item()
-            
-            return round(macc, 4)
+            def compute_mean_acc_lowres(meters):
+                macc = torch.nanmean(meters['_area_intersect_lowres'].sum / (meters['_area_label_lowres'].sum))
+                macc = macc if isinstance(macc, float) else macc.item()
+                
+                return round(macc, 4)
 
-        def compute_all_acc_lowres(meters):
-            all_acc = meters['_area_intersect_lowres'].sum.sum() / meters['_area_pred_label_lowres'].sum.sum()
-            all_acc = all_acc if isinstance(all_acc, float) else all_acc.item()
-            
-            return round(all_acc, 4)
+            metrics.log_derived("aAcc_lowres", compute_all_acc_lowres)
+            metrics.log_derived("mIoU_lowres", compute_mean_iou_lowres)
+            metrics.log_derived("mAcc_lowres", compute_mean_acc_lowres)
 
-        def compute_mean_iou_lowres(meters):
-            miou = torch.nanmean(meters['_area_intersect_lowres'].sum / (meters['_area_union_lowres'].sum))
-            miou = miou if isinstance(miou, float) else miou.item()
-            
-            return round(miou, 4)
 
-        def compute_mean_acc_lowres(meters):
-            macc = torch.nanmean(meters['_area_intersect_lowres'].sum / (meters['_area_label_lowres'].sum))
-            macc = macc if isinstance(macc, float) else macc.item()
-            
-            return round(macc, 4)
+        if "area_intersect" in logging_outputs[0]:
+            area_intersect_sum = sum(log.get("area_intersect", 0) for log in logging_outputs)
+            area_pred_label_sum = sum(log.get("area_pred_label", 0) for log in logging_outputs)
+            area_label_sum = sum(log.get("area_label", 0) for log in logging_outputs)
+            area_union_sum = sum(log.get("area_union", 0) for log in logging_outputs)
 
-        metrics.log_derived("aAcc", compute_all_acc)
-        metrics.log_derived("mIoU", compute_mean_iou)
-        metrics.log_derived("mAcc", compute_mean_acc)
+            metrics.log_scalar_sum(
+                "_area_intersect", area_intersect_sum, 1
+            )
+            metrics.log_scalar_sum(
+                "_area_pred_label", area_pred_label_sum, 1
+            )
+            metrics.log_scalar_sum(
+                "_area_label", area_label_sum, 1
+            )
+            metrics.log_scalar_sum(
+                "_area_union", area_union_sum, 1
+            )
 
-        metrics.log_derived("aAcc_lowres", compute_all_acc_lowres)
-        metrics.log_derived("mIoU_lowres", compute_mean_iou_lowres)
-        metrics.log_derived("mAcc_lowres", compute_mean_acc_lowres)
+            def compute_all_acc(meters):
+                all_acc = meters['_area_intersect'].sum.sum() / meters['_area_pred_label'].sum.sum()
+                all_acc = all_acc if isinstance(all_acc, float) else all_acc.item()
+                
+                return round(all_acc, 4)
+
+            def compute_mean_iou(meters):
+                miou = torch.nanmean(meters['_area_intersect'].sum / (meters['_area_union'].sum))
+                miou = miou if isinstance(miou, float) else miou.item()
+                
+                return round(miou, 4)
+
+            def compute_mean_acc(meters):
+                macc = torch.nanmean(meters['_area_intersect'].sum / (meters['_area_label'].sum)) # nanmean
+                macc = macc if isinstance(macc, float) else macc.item()
+                
+                return round(macc, 4)
+
+            metrics.log_derived("aAcc", compute_all_acc)
+            metrics.log_derived("mIoU", compute_mean_iou)
+            metrics.log_derived("mAcc", compute_mean_acc)
 
         total = utils.item(sum(log.get("total", 0) for log in logging_outputs))
         if total > 0:
