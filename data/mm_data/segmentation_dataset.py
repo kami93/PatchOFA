@@ -136,6 +136,11 @@ CLASSES_COCOC = np.array([
     'building', 'ground', 'plant', 'sky', 'solid', 
     'structural', 'water', 'unknown'])
 
+CLASSES_COCO_UNSEEN = np.array([
+    'frisbee', 'skateboard', 'cardboard', 'carrot', 'scissors', 
+    'suitcase', 'giraffe', 'cow', 'road', 'concrete wall', 
+    'tree', 'grass', 'river', 'clouds', 'playingfield', 'unknown'])
+
 CLASSES_COCOC_AUGMENTED = [
     ['electronic', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone'],
     ['appliance', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'blender'],
@@ -336,6 +341,8 @@ class SegmentationDataset(OFADataset):
             self.id2offset = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(self.id2numtext)[:-1]])
         elif self.num_seg == 149+1:
             self.id2rawtext = [x for x in CLASSES_ADE]
+        elif self.num_seg == 15:
+            self.id2rawtext = [x for x in CLASSES_COCO_UNSEEN]
         elif self.num_seg == 168+1:
             self.id2rawtext = [x for x in CLASSES_COCOC]
             self.id2rawtext = self.id2rawtext + [x for x in CLASSES_ADE if x not in CLASSES_COCOC]
@@ -576,11 +583,14 @@ class SegmentationDataset(OFADataset):
                     extended_class_id = self.id2offset[class_id] + randint
                     extended_rand.append(extended_class_id)
                 extended_rand = np.array(extended_rand)
-
-            extended_rand = torch.from_numpy(extended_rand).reshape(1, 1, sh, sw)
-            fakeimage_ids = self.downsample_gt_seg(extended_rand).reshape(-1).tolist()
-
-            rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
+                extended_rand = torch.from_numpy(extended_rand).reshape(1, 1, sh, sw)
+                fakeimage_ids = self.downsample_gt_seg(extended_rand).reshape(-1).tolist()
+                rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
+            
+            else:
+                rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
+                fakeimage_ids = self.downsample_gt_seg(rand).reshape(-1).tolist()
+            
             upsample_rand = self.downsample_gt_seg(rand).reshape(-1).tolist()
             fakeimage_target = self.seg2code[upsample_rand]
                 
