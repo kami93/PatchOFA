@@ -447,16 +447,18 @@ class SegCriterionV3(FairseqCriterion):
                 patch_images = sample["net_input"]["patch_images"]
                 (h, w) = patch_images.shape[-2:]
                 
-                num_h_slice = math.ceil(h / 512)
-                num_w_slice = math.ceil(w / 512)
+                short_side = min(h, w)
                 
-                h_offset_list = torch.linspace(0, h-512, steps=num_h_slice, dtype=torch.int).tolist()
-                w_offset_list = torch.linspace(0, w-512, steps=num_w_slice, dtype=torch.int).tolist()
+                num_h_slice = math.ceil(h / short_side)
+                num_w_slice = math.ceil(w / short_side)
+                
+                h_offset_list = torch.linspace(0, h-short_side, steps=num_h_slice, dtype=torch.int).tolist()
+                w_offset_list = torch.linspace(0, w-short_side, steps=num_w_slice, dtype=torch.int).tolist()
 
                 if num_h_slice == 1:
                     h_cut_per_region = [(0, 0)]
                 else:
-                    h_overlap = num_h_slice * 512 - h
+                    h_overlap = num_h_slice * short_side - h
                     num_h_overlap_region = num_h_slice - 1
                     h_cut_per_region = [h_overlap//num_h_overlap_region if h_i >= (h_overlap % num_h_overlap_region) else h_overlap//num_h_overlap_region+1 for h_i in range(num_h_overlap_region)]
                     h_cut_per_region = [(math.floor(h_cut/2), math.ceil(h_cut/2)) for h_cut in h_cut_per_region]
@@ -464,7 +466,7 @@ class SegCriterionV3(FairseqCriterion):
                 if num_w_slice == 1:
                     w_cut_per_region = [(0, 0)]
                 else:
-                    w_overlap = num_w_slice * 512 - w
+                    w_overlap = num_w_slice * short_side - w
                     num_w_overlap_region = num_w_slice - 1
                     w_cut_per_region = [w_overlap//num_w_overlap_region if w_i >= (w_overlap % num_w_overlap_region) else w_overlap//num_w_overlap_region+1 for w_i in range(num_w_overlap_region)]
                     w_cut_per_region = [(math.floor(w_cut/2), math.ceil(w_cut/2)) for w_cut in w_cut_per_region]
@@ -476,7 +478,7 @@ class SegCriterionV3(FairseqCriterion):
                         h_offset = h_offset_list[h_i]
                         w_offset = w_offset_list[w_i]
                         
-                        _patch_images = patch_images[..., h_offset:h_offset+512, w_offset:w_offset+512]
+                        _patch_images = patch_images[..., h_offset:h_offset+short_side, w_offset:w_offset+short_side]
                         
                         sample["net_input"]["patch_images"] = _patch_images
                         _x, extra = model(**sample["net_input"])
@@ -490,7 +492,6 @@ class SegCriterionV3(FairseqCriterion):
                 extra['w_cut_per_region'] = w_cut_per_region
                 extra['num_h_slice'] = num_h_slice
                 extra['num_w_slice'] = num_w_slice
-
             
             else:
                 net_output = model(**sample["net_input"])
@@ -814,6 +815,7 @@ class SegCriterionV3(FairseqCriterion):
 
         (hp, wp) = extra['encoder_returns']['image_embed_shape'][0]
         (h, w) = sample['net_input']['patch_images'].shape[-2:]
+        short_side = min(h, w)
 
         if isinstance(classifier_scores_lowres, list):
             h_cut_per_region = extra['h_cut_per_region']
@@ -829,25 +831,25 @@ class SegCriterionV3(FairseqCriterion):
                     _classifier_scores = self.upsample_logits(_classifier_scores_lowres, hp=hp, wp=wp, h=h, w=w) # bilinear upsample
                     
                     _classifier_scores_image, _classifier_scores_eos = _classifier_scores[:, :-1], _classifier_scores[:, -1:]
-                    _classifier_scores_image = rearrange(_classifier_scores_image, 'b (h w) d -> b h w d', h=512, w=512)
+                    _classifier_scores_image = rearrange(_classifier_scores_image, 'b (h w) d -> b h w d', h=short_side, w=short_side)
                     
                     if h_i == 0:
-                        _classifier_scores_image = _classifier_scores_image[:, :512-h_cut_per_region[h_i][0], :, :]
+                        _classifier_scores_image = _classifier_scores_image[:, :short_side-h_cut_per_region[h_i][0], :, :]
                     
                     elif h_i == num_h_slice-1:
                         _classifier_scores_image = _classifier_scores_image[:, h_cut_per_region[h_i-1][1]:, :, :]
                     
                     else:
-                        _classifier_scores_image = _classifier_scores_image[:, h_cut_per_region[h_i-1][1]:512-h_cut_per_region[h_i][0], :, :]
+                        _classifier_scores_image = _classifier_scores_image[:, h_cut_per_region[h_i-1][1]:short_side-h_cut_per_region[h_i][0], :, :]
                     
                     if w_i == 0:
-                        _classifier_scores_image = _classifier_scores_image[:, :, :512-w_cut_per_region[w_i][0], :]
+                        _classifier_scores_image = _classifier_scores_image[:, :, :short_side-w_cut_per_region[w_i][0], :]
                     
                     elif w_i == num_w_slice-1:
                         _classifier_scores_image = _classifier_scores_image[:, :, w_cut_per_region[w_i-1][1]:, :]
                     
                     else:
-                        _classifier_scores_image = _classifier_scores_image[:, :, w_cut_per_region[w_i-1][1]:512-w_cut_per_region[w_i][0], :]
+                        _classifier_scores_image = _classifier_scores_image[:, :, w_cut_per_region[w_i-1][1]:short_side-w_cut_per_region[w_i][0], :]
             
                     _classifier_scores_w_list.append(_classifier_scores_image)
                     
