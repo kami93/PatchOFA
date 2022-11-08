@@ -113,6 +113,10 @@ class SegmentationConfig(OFAConfig):
         default=1,
         metadata={"help": "1-5"},
     )
+    epoch_row_count: int = field(
+        default=-1,
+        metadata={"help": "if -1, disabled."},
+    )
 
 @register_task("segmentation", dataclass=SegmentationConfig)
 class SegmentationTask(OFATask):
@@ -163,9 +167,10 @@ class SegmentationTask(OFATask):
         
         # assert self.cfg.selected_cols == '0,1,2'
         dataset = FileDataset(table_path, self.cfg.selected_cols)
-        # if split == 'train':
-        #     dataset.total_row_count = 1600
-        #     dataset._compute_start_pos_and_row_count()
+        if split == 'train' and self.cfg.epoch_row_count > -1:
+            logger.info(f"Setting epoch row count to {self.cfg.epoch_row_count}")
+            dataset.total_row_count = self.cfg.epoch_row_count
+            dataset._compute_start_pos_and_row_count()
 
         self.datasets[split] = SegmentationDataset(
             split,
