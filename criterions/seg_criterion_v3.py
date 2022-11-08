@@ -951,7 +951,7 @@ class SegCriterionV3(FairseqCriterion):
             elif self.output_classes == 27:
                 CLASSES = CLASSES_COCOC_AUGMENTED
             elif self.output_classes == 15:
-                CLASSES = CLASSES_COCOC_AUGMENTED
+                CLASSES = CLASSES_COCO_UNSEEN
             else:
                 raise NotImplementedError
 
