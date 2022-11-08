@@ -94,10 +94,13 @@ CLASSES_COCOC = np.array([
     'building', 'ground', 'plant', 'sky', 'solid', 
     'structural', 'water'])
 
+CLASSES_COCO_SEEN = np.array(
+    ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'bear', 'zebra', 'giraffe', 'umbrella', 'handbag', 'tie', 'suitcase', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'pizza', 'donut', 'cake', 'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'hair drier', 'toothbrush', 'banner', 'blanket', 'branch', 'bridge', 'building', 'bush', 'cabinet', 'cage', 'cardboard', 'ceiling', 'tile ceiling', 'cloth', 'clothes', 'clouds', 'cupboard', 'curtain', 'desk', 'dirt', 'door', 'fence', 'marble floor', 'floor', 'stone floor', 'tile floor', 'wood floor', 'flower', 'fog', 'food', 'fruit', 'furniture', 'grass', 'ground', 'hill', 'house', 'leaves', 'light', 'mat', 'metal', 'mirror', 'moss', 'mountain', 'mud', 'napkin', 'net', 'paper', 'pavement', 'pillow', 'plant', 'plastic', 'platform', 'playingfield', 'railroad', 'river', 'roof', 'rug', 'salad', 'sand', 'sea', 'shelf', 'sky', 'skyscraper', 'snow', 'solid', 'stairs', 'stone', 'straw', 'structural', 'table', 'tent', 'textile', 'towel', 'tree', 'brick wall', 'concrete wall', 'panal wall', 'stone wall', 'tile wall', 'wood wall', 'water', 'waterdrops', 'blind window', 'window', 'wood'])
+
 CLASSES_COCO_UNSEEN = np.array([
     'frisbee', 'skateboard', 'cardboard', 'carrot', 'scissors', 
     'suitcase', 'giraffe', 'cow', 'road', 'concrete wall', 
-    'tree', 'grass', 'river', 'clouds', 'playingfield', 'unknown'])
+    'tree', 'grass', 'river', 'clouds', 'playingfield'])
 
 CLASSES_COCOC_AUGMENTED = [
     ['electronic', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone'],
@@ -952,6 +955,8 @@ class SegCriterionV3(FairseqCriterion):
                 CLASSES = CLASSES_COCOC_AUGMENTED
             elif self.output_classes == 15:
                 CLASSES = CLASSES_COCO_UNSEEN
+            elif self.output_classes == 156:
+                CLASSES = CLASSES_COCO_SEEN
             else:
                 raise NotImplementedError
 

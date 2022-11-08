@@ -136,6 +136,9 @@ CLASSES_COCOC = np.array([
     'building', 'ground', 'plant', 'sky', 'solid', 
     'structural', 'water', 'unknown'])
 
+CLASSES_COCO_SEEN = np.array(
+    ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'bear', 'zebra', 'giraffe', 'umbrella', 'handbag', 'tie', 'suitcase', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'pizza', 'donut', 'cake', 'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'hair drier', 'toothbrush', 'banner', 'blanket', 'branch', 'bridge', 'building', 'bush', 'cabinet', 'cage', 'cardboard', 'ceiling', 'tile ceiling', 'cloth', 'clothes', 'clouds', 'cupboard', 'curtain', 'desk', 'dirt', 'door', 'fence', 'marble floor', 'floor', 'stone floor', 'tile floor', 'wood floor', 'flower', 'fog', 'food', 'fruit', 'furniture', 'grass', 'ground', 'hill', 'house', 'leaves', 'light', 'mat', 'metal', 'mirror', 'moss', 'mountain', 'mud', 'napkin', 'net', 'paper', 'pavement', 'pillow', 'plant', 'plastic', 'platform', 'playingfield', 'railroad', 'river', 'roof', 'rug', 'salad', 'sand', 'sea', 'shelf', 'sky', 'skyscraper', 'snow', 'solid', 'stairs', 'stone', 'straw', 'structural', 'table', 'tent', 'textile', 'towel', 'tree', 'brick wall', 'concrete wall', 'panal wall', 'stone wall', 'tile wall', 'wood wall', 'water', 'waterdrops', 'blind window', 'window', 'wood', 'unknown'])
+
 CLASSES_COCO_UNSEEN = np.array([
     'frisbee', 'skateboard', 'cardboard', 'carrot', 'scissors', 
     'suitcase', 'giraffe', 'cow', 'road', 'concrete wall', 
@@ -343,6 +346,8 @@ class SegmentationDataset(OFADataset):
             self.id2rawtext = [x for x in CLASSES_ADE]
         elif self.num_seg == 15:
             self.id2rawtext = [x for x in CLASSES_COCO_UNSEEN]
+        elif self.num_seg == 156:
+            self.id2rawtext = [x for x in CLASSES_COCO_SEEN]
         elif self.num_seg == 168+1:
             self.id2rawtext = [x for x in CLASSES_COCOC]
             self.id2rawtext = self.id2rawtext + [x for x in CLASSES_ADE if x not in CLASSES_COCOC]
