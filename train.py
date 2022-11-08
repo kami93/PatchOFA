@@ -185,8 +185,8 @@ def main(cfg: FairseqConfig) -> None:
     lr = trainer.get_lr()
 
     # Do validation first.
-    valid_subsets = cfg.dataset.valid_subset.split(",")
-    valid_losses = validate(cfg, trainer, task, epoch_itr, valid_subsets)
+    # valid_subsets = cfg.dataset.valid_subset.split(",")
+    # valid_losses = validate(cfg, trainer, task, epoch_itr, valid_subsets)
 
     train_meter = meters.StopwatchMeter()
     train_meter.start()
