@@ -193,9 +193,12 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
             self.window_size = args.code_image_size // 8
 
+            self.seg_bucket_size=args.patch_image_size // 16
+            logger.info(f"seg_bucket_size: {self.seg_bucket_size}")
+
             self.embed_positions = Embedding(args.max_target_positions + 2, embed_dim)
             self.embed_image_positions = Embedding(args.image_bucket_size ** 2 + 1, embed_dim)
-            self.embed_seg_positions = Embedding(1024 + 1, embed_dim)
+            self.embed_seg_positions = Embedding(self.seg_bucket_size**2 + 1, embed_dim)
             self.pos_ln = LayerNorm(embed_dim)
             self.image_pos_ln = LayerNorm(embed_dim)
             self.seg_pos_ln = LayerNorm(embed_dim)
@@ -256,13 +259,12 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 [Embedding(image_num_rel_dis, self.num_attention_heads, zero_init=True) for _ in range(args.decoder_layers)]
             )
             
-            seg_bucket_size=32
-            seg_num_rel_dis = (2 * seg_bucket_size - 1) * (2 * seg_bucket_size - 1) + 3
+            seg_num_rel_dis = (2 * self.seg_bucket_size - 1) * (2 * self.seg_bucket_size - 1) + 3
             
             self.seg_rel_pos_table_list = nn.ModuleList(
                 [Embedding(seg_num_rel_dis, self.num_attention_heads, zero_init=True) for _ in range(args.decoder_layers)]
             )
-            seg_rp_bucket = make_image_bucket_position(seg_bucket_size, seg_num_rel_dis)
+            seg_rp_bucket = make_image_bucket_position(self.seg_bucket_size, seg_num_rel_dis)
             
             # num_seg_tokens = 150
             # seg_embed_idx = []
@@ -582,7 +584,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if self.decoder_input_type == 'encoder_input':
                 image_embed_before_scale = encoder_out["image_embed_before_scale"][0]
             elif self.decoder_input_type == 'encoder_output':
-                image_embed_before_scale = rearrange(encoder_out["encoder_out"][0][:1024], 'l b d -> b l d')
+                image_embed_before_scale = rearrange(encoder_out["encoder_out"][0][:h * w], 'l b d -> b l d')
 
             if self.no_grad_image:
                 image_embed_before_scale = image_embed_before_scale.detach() # STOP_GRAD
@@ -593,12 +595,12 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             x = x * self.embed_scale
             
             # token_position_idx = utils.new_arange(prev_output_tokens)
-            old_token_position_idx = torch.arange(1025, dtype=prev_output_tokens.dtype, device=prev_output_tokens.device)
+            old_token_position_idx = torch.arange(self.seg_bucket_size**2 + 1, dtype=prev_output_tokens.dtype, device=prev_output_tokens.device)
             old_token_position_idx = old_token_position_idx.unsqueeze(0).expand(bsz, -1)
             old_tgt_pos_embed = self.embed_seg_positions(old_token_position_idx)
 
-            old_tgt_pos_embed_bos, old_tgt_pos_embed_seg = torch.split(old_tgt_pos_embed, [1, 1024], dim=1)
-            old_tgt_pos_embed_seg = rearrange(old_tgt_pos_embed_seg, 'b (h w) d -> b d h w', h=32, w=32)
+            old_tgt_pos_embed_bos, old_tgt_pos_embed_seg = torch.split(old_tgt_pos_embed, [1, self.seg_bucket_size**2], dim=1)
+            old_tgt_pos_embed_seg = rearrange(old_tgt_pos_embed_seg, 'b (h w) d -> b d h w', h=self.seg_bucket_size, w=self.seg_bucket_size)
         
             tgt_pos_embed_seg = F.interpolate(old_tgt_pos_embed_seg, size=(h, w), mode='bilinear')
             tgt_pos_embed_seg = rearrange(tgt_pos_embed_seg, 'b c h w -> b (h w) c')
@@ -659,20 +661,20 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         
                 old_rel_pos_bias = self.get_seg_rel_pos_bias(all_prev_output_tokens, idx).unsqueeze(0)
                 old_rel_pos_bias = rearrange(old_rel_pos_bias, 'b c hw1 hw2 -> (b hw2) c hw1')
-                old_rel_pos_bias_bos, old_rel_pos_bias_seg = torch.split(old_rel_pos_bias, [1, 1024], dim=-1)
+                old_rel_pos_bias_bos, old_rel_pos_bias_seg = torch.split(old_rel_pos_bias, [1, self.seg_bucket_size**2], dim=-1)
                 
-                old_rel_pos_bias_seg = rearrange(old_rel_pos_bias_seg, 'b c (h w) -> b c h w', h=32, w=32)
+                old_rel_pos_bias_seg = rearrange(old_rel_pos_bias_seg, 'b c (h w) -> b c h w', h=self.seg_bucket_size, w=self.seg_bucket_size)
                 
                 old_rel_pos_bias_seg = F.interpolate(old_rel_pos_bias_seg, size=(h, w), mode='bilinear')
                 
                 old_rel_pos_bias_seg = rearrange(old_rel_pos_bias_seg, 'b c h w -> b c (h w)')
                 old_rel_pos_bias = torch.cat([old_rel_pos_bias_bos, old_rel_pos_bias_seg], dim=-1)
                 
-                old_rel_pos_bias = rearrange(old_rel_pos_bias, '(b hw2) c hw1 -> (b hw1) c hw2', hw1=tgt_len, hw2=1025)
+                old_rel_pos_bias = rearrange(old_rel_pos_bias, '(b hw2) c hw1 -> (b hw1) c hw2', hw1=tgt_len, hw2=self.seg_bucket_size**2 + 1)
 
-                old_rel_pos_bias_bos, old_rel_pos_bias_seg = torch.split(old_rel_pos_bias, [1, 1024], dim=-1)
+                old_rel_pos_bias_bos, old_rel_pos_bias_seg = torch.split(old_rel_pos_bias, [1, self.seg_bucket_size**2], dim=-1)
                 
-                old_rel_pos_bias_seg = rearrange(old_rel_pos_bias_seg, 'b c (h w) -> b c h w', h=32, w=32)
+                old_rel_pos_bias_seg = rearrange(old_rel_pos_bias_seg, 'b c (h w) -> b c h w', h=self.seg_bucket_size, w=self.seg_bucket_size)
                 
                 old_rel_pos_bias_seg = F.interpolate(old_rel_pos_bias_seg, size=(h, w), mode='bilinear')
                 

@@ -316,6 +316,9 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--decoder-input-type', type=str, default='encoder_input',
                             help='encoder_input | encoder_output')
         
+        parser.add_argument('--patch-image-size', type=int, default=512,
+                            help='patch_image_size')
+        
         # fmt: on
 
     @classmethod

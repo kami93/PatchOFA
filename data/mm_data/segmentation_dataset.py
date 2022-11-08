@@ -284,7 +284,7 @@ class SegmentationDataset(OFADataset):
         self.max_src_length = max_src_length
         self.max_tgt_length = max_tgt_length
         self.patch_image_size = patch_image_size
-
+        logger.info(f"patch_image_size: {patch_image_size}")
         self.cfg = cfg
 
         if imagenet_default_mean_and_std:
@@ -298,22 +298,22 @@ class SegmentationDataset(OFADataset):
                                                     transforms.Normalize(mean=mean, std=std)])
         if self.split == 'train':
             self.image_transform = transforms.Compose([
-                Resize(img_scale=(2048, 512), ratio_range=(0.5, 2.0), min_size=512),
-                RandomCrop(crop_size=(512, 512), cat_max_ratio=0.75),
+                Resize(img_scale=(self.patch_image_size*4, self.patch_image_size), ratio_range=(0.5, 2.0), min_size=self.patch_image_size),
+                RandomCrop(crop_size=(self.patch_image_size, self.patch_image_size), cat_max_ratio=0.75),
                 RandomFlip(prob=0.5),
                 PhotoMetricDistortion(),
             ])
             
-            self.downsample_gt_seg = transforms.Resize((32, 32), transforms.InterpolationMode.NEAREST)
+            self.downsample_gt_seg = transforms.Resize((self.patch_image_size//16, self.patch_image_size//16), transforms.InterpolationMode.NEAREST)
 
 
         else:
-            self.image_transform = MultiScaleFlipAug(img_scale=(2048, 512),
+            self.image_transform = MultiScaleFlipAug(img_scale=(self.patch_image_size*4, self.patch_image_size),
                                                           flip=False,
                                                           transforms=[dict(type='Resize', keep_ratio=True),
                                                                       dict(type='RandomFlip')])
-            self.downsample_gt_seg = transforms.Resize((32, 32), transforms.InterpolationMode.NEAREST)
-        
+            self.downsample_gt_seg = transforms.Resize((self.patch_image_size//16, self.patch_image_size//16), transforms.InterpolationMode.NEAREST)
+
         prompt_prefix=self.cfg.prompt_prefix
         if len(prompt_prefix):
             self.prompt = self.encode_text(f' {prompt_prefix.lstrip()}')
@@ -418,8 +418,6 @@ class SegmentationDataset(OFADataset):
             img = aug_dict.pop('img')
             img = img[:, :, ::-1].copy() # to RGB
             img = self.image_normalize(img)
-            # test = img * torch.tensor(IMAGENET_DEFAULT_STD).reshape(3, 1, 1) + torch.tensor(IMAGENET_DEFAULT_MEAN).reshape(3, 1, 1)
-            
             gt_semantic_seg = aug_dict.pop('gt_semantic_seg')
             gt_semantic_seg = torch.from_numpy(gt_semantic_seg.astype(np.int64))
 
@@ -439,8 +437,6 @@ class SegmentationDataset(OFADataset):
                 
             img = self.image_normalize(img)
 
-            # gt_semantic_seg_list = multiscale_images.pop('gt_semantic_seg')
-            # gt_semantic_seg = gt_semantic_seg_list[0]
             gt_semantic_seg = img_dict.pop('gt_semantic_seg')[0]
             gt_semantic_seg = torch.from_numpy(gt_semantic_seg.astype(np.int64))
             
