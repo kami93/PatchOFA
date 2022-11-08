@@ -94,6 +94,11 @@ CLASSES_COCOC = np.array([
     'building', 'ground', 'plant', 'sky', 'solid', 
     'structural', 'water'])
 
+CLASSES_COCO_UNSEEN = np.array([
+    'frisbee', 'skateboard', 'cardboard', 'carrot', 'scissors', 
+    'suitcase', 'giraffe', 'cow', 'road', 'concrete wall', 
+    'tree', 'grass', 'river', 'clouds', 'playingfield', 'unknown'])
+
 CLASSES_COCOC_AUGMENTED = [
     ['electronic', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone'],
     ['appliance', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'blender'],
@@ -891,7 +896,7 @@ class SegCriterionV3(FairseqCriterion):
             metrics["area_label_lowres"] = area_label_lowres
             metrics["area_union_lowres"] = area_union_lowres
 
-        assert self.student_temperature == 1.0 # to avoid mistakes...
+        # assert self.student_temperature == 1.0 # to avoid mistakes...
         if self.upscale_lprobs:
             loss = F.cross_entropy(classifier_scores / self.student_temperature, target.detach(), label_smoothing=self.eps) # just for display
         else:
@@ -944,6 +949,8 @@ class SegCriterionV3(FairseqCriterion):
             elif self.output_classes == 171:
                 CLASSES = CLASSES_COCOF
             elif self.output_classes == 27:
+                CLASSES = CLASSES_COCOC_AUGMENTED
+            elif self.output_classes == 15:
                 CLASSES = CLASSES_COCOC_AUGMENTED
             else:
                 raise NotImplementedError
