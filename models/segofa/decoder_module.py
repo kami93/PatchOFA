@@ -593,20 +593,32 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             # 어차피 unlabeled loss 의 학습이 시작될 때 embedding 전체를 프리즈시키기 때문에 bos 관련해서는 아무것도 안해줘도 됨.
             x = torch.cat([self.embed_tokens(bos), image_embed_before_scale], dim=1)
             x = x * self.embed_scale
-            
-            # token_position_idx = utils.new_arange(prev_output_tokens)
-            old_token_position_idx = torch.arange(self.seg_bucket_size**2 + 1, dtype=prev_output_tokens.dtype, device=prev_output_tokens.device)
-            old_token_position_idx = old_token_position_idx.unsqueeze(0).expand(bsz, -1)
-            old_tgt_pos_embed = self.embed_seg_positions(old_token_position_idx)
 
-            old_tgt_pos_embed_bos, old_tgt_pos_embed_seg = torch.split(old_tgt_pos_embed, [1, self.seg_bucket_size**2], dim=1)
-            old_tgt_pos_embed_seg = rearrange(old_tgt_pos_embed_seg, 'b (h w) d -> b d h w', h=self.seg_bucket_size, w=self.seg_bucket_size)
-        
-            tgt_pos_embed_seg = F.interpolate(old_tgt_pos_embed_seg, size=(h, w), mode='bilinear')
-            tgt_pos_embed_seg = rearrange(tgt_pos_embed_seg, 'b c h w -> b (h w) c')
-            tgt_pos_embed = torch.cat([old_tgt_pos_embed_bos, tgt_pos_embed_seg], dim=1)
+            prev_output_tokens = torch.zeros_like(x, dtype=torch.long, device=x.device)
+            old_image_position_ids = torch.arange(self.seg_bucket_size).unsqueeze(0).expand(self.seg_bucket_size, self.seg_bucket_size) + \
+                                     torch.arange(self.seg_bucket_size).unsqueeze(1) * self.seg_bucket_size + 1
+            old_image_position_ids = old_image_position_ids.to(x.device)
+            old_image_pos_embed = self.embed_seg_positions(old_image_position_ids)
+            old_image_pos_embed = old_image_pos_embed.reshape(1, self.seg_bucket_size, self.seg_bucket_size, -1).permute(0, 3, 1, 2)
+            image_pos_embed = F.interpolate(old_image_pos_embed, size=(h, w), mode='bilinear')
+            image_pos_embed = image_pos_embed.permute(0, 2, 3, 1).reshape(1, h*w, -1)
+            image_pos_embed = image_pos_embed.expand(bsz, -1, -1)
             
-            tgt_pos_embed = tgt_pos_embed[:, :prev_output_tokens.size(1)]
+            tgt_pos_embed = torch.cat([self.embed_seg_positions(torch.tensor([0],device=x.device)).unsqueeze(0).expand(bsz, -1, -1), image_pos_embed], dim=1)
+
+            # # token_position_idx = utils.new_arange(prev_output_tokens)
+            # old_token_position_idx = torch.arange(self.seg_bucket_size**2 + 1, dtype=prev_output_tokens.dtype, device=prev_output_tokens.device)
+            # old_token_position_idx = old_token_position_idx.unsqueeze(0).expand(bsz, -1)
+            # old_tgt_pos_embed = self.embed_seg_positions(old_token_position_idx)
+
+            # old_tgt_pos_embed_bos, old_tgt_pos_embed_seg = torch.split(old_tgt_pos_embed, [1, self.seg_bucket_size**2], dim=1)
+            # old_tgt_pos_embed_seg = rearrange(old_tgt_pos_embed_seg, 'b (h w) d -> b d h w', h=self.seg_bucket_size, w=self.seg_bucket_size)
+        
+            # tgt_pos_embed_seg = F.interpolate(old_tgt_pos_embed_seg, size=(h, w), mode='bilinear')
+            # tgt_pos_embed_seg = rearrange(tgt_pos_embed_seg, 'b c h w -> b (h w) c')
+            # tgt_pos_embed = torch.cat([old_tgt_pos_embed_bos, tgt_pos_embed_seg], dim=1)
+            
+            # tgt_pos_embed = tgt_pos_embed[:, :prev_output_tokens.size(1)]
 
             # self attn position bias
             self_abs_pos_bias = self.get_pos_info(prev_output_tokens, tgt_pos_embed, use_seg=True)
@@ -662,7 +674,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 old_rel_pos_bias = self.get_seg_rel_pos_bias(all_prev_output_tokens, idx).unsqueeze(0)
                 old_rel_pos_bias = rearrange(old_rel_pos_bias, 'b c hw1 hw2 -> (b hw2) c hw1')
                 old_rel_pos_bias_bos, old_rel_pos_bias_seg = torch.split(old_rel_pos_bias, [1, self.seg_bucket_size**2], dim=-1)
-                
+
                 old_rel_pos_bias_seg = rearrange(old_rel_pos_bias_seg, 'b c (h w) -> b c h w', h=self.seg_bucket_size, w=self.seg_bucket_size)
                 
                 old_rel_pos_bias_seg = F.interpolate(old_rel_pos_bias_seg, size=(h, w), mode='bilinear')

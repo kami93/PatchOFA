@@ -352,9 +352,12 @@ class TransformerEncoder(FairseqEncoder):
             image_num_patches = sample_patch_num
             image_padding_mask = image_padding_mask.gather(1, patch_orders)
             image_position_ids = image_position_ids.gather(1, patch_orders)
-        orig_num_patches = (self.orig_patch_image_size // 16) ** 2
-        orig_hw= self.orig_patch_image_size // 16
-        if getattr(self.args, "interpolate_position", False) and image_num_patches > orig_num_patches:
+        # orig_num_patches = (self.orig_patch_image_size // 16) ** 2
+        # orig_hw= self.orig_patch_image_size // 16
+        orig_num_patches = (512 // 16) ** 2
+        orig_hw= 512 // 16
+        # if getattr(self.args, "interpolate_position", False) and image_num_patches > orig_num_patches:
+        if image_num_patches > orig_num_patches:
             old_image_position_ids = torch.arange(orig_hw).unsqueeze(0).expand(orig_hw, orig_hw) + \
                                      torch.arange(orig_hw).unsqueeze(1) * self.args.image_bucket_size + 1
             old_image_position_ids = old_image_position_ids.to(device)
@@ -817,18 +820,32 @@ class TransformerEncoder(FairseqEncoder):
 
         if prompt_padding_mask is not None:
             encoder_padding_mask = torch.cat([prompt_padding_mask, encoder_padding_mask], dim=1)
+
+        image_position_idx = torch.arange(32).unsqueeze(0).expand(32, 32) + \
+                             torch.arange(32).unsqueeze(1) * self.args.image_bucket_size + 1
+        image_position_idx = image_position_idx.view(-1).to(src_tokens.device)
+        image_position_ids = image_position_idx[None, :].expand(patch_images.size(0), 1024)
+
         # encoder layers
         for idx, layer in enumerate(self.layers):
             self_attn_bias = abs_pos_bias.clone()
             self_attn_bias[:, :, -src_tokens.size(1):, -src_tokens.size(1):] += self.get_rel_pos_bias(src_tokens, idx)
             if patch_images_2 is not None:
+                assert(False)
                 self_attn_bias[:, :, :image_num_patches_2, :image_num_patches_2] += \
                     self.get_image_rel_pos_bias(image_position_ids_2, idx)
                 self_attn_bias[:, :, image_num_patches_2:image_num_patches_2+image_num_patches, image_num_patches_2:image_num_patches_2+image_num_patches] += \
                     self.get_image_rel_pos_bias(image_position_ids, idx)
             elif patch_images is not None:
-                self_attn_bias[:, :, :x.size(0) - src_tokens.size(1), :x.size(0) - src_tokens.size(1)] += \
-                    self.get_image_rel_pos_bias(image_position_ids, idx)
+                # self_attn_bias[:, :, :x.size(0) - src_tokens.size(1), :x.size(0) - src_tokens.size(1)] += \
+                #     self.get_image_rel_pos_bias(image_position_ids, idx)
+                image_rel_pos_bias = self.get_image_rel_pos_bias(image_position_ids, idx)
+                image_rel_pos_bias = rearrange(image_rel_pos_bias, 'b d (h1 w1) (h2 w2) -> (b h1 w1) d h2 w2', h1=32, w1=32, h2=32, w2=32)
+                image_rel_pos_bias = F.interpolate(image_rel_pos_bias, size=image_embed_shape, mode='bilinear')
+                image_rel_pos_bias = rearrange(image_rel_pos_bias, '(b h1 w1) d h2 w2 -> (b h2 w2) d h1 w1', h1=32, w1=32, h2=image_embed_shape[0], w2=image_embed_shape[1])
+                image_rel_pos_bias = F.interpolate(image_rel_pos_bias, size=image_embed_shape, mode='bilinear')
+                image_rel_pos_bias = rearrange(image_rel_pos_bias, '(b h2 w2) d h1 w1 -> b d (h1 w1) (h2 w2)', h1=image_embed_shape[0], w1=image_embed_shape[1], h2=image_embed_shape[0], w2=image_embed_shape[1])
+                self_attn_bias[:, :, :x.size(0) - src_tokens.size(1), :x.size(0) - src_tokens.size(1)] += image_rel_pos_bias
             self_attn_bias = self_attn_bias.reshape(-1, self_attn_bias.size(2), self_attn_bias.size(2))
             if self.args.encoder_prompt:
                 if self.args.encoder_prompt_type != "prompt":
@@ -840,8 +857,11 @@ class TransformerEncoder(FairseqEncoder):
                         prompt_kv = None
             else:
                 prompt_kv = None 
-            x = layer(x, encoder_padding_mask=encoder_padding_mask if has_pads else None, \
-                    self_attn_bias=self_attn_bias, prompt_kv=prompt_kv)
+            try:
+                x = layer(x, encoder_padding_mask=encoder_padding_mask if has_pads else None, \
+                        self_attn_bias=self_attn_bias, prompt_kv=prompt_kv)
+            except:
+                breakpoint()
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)

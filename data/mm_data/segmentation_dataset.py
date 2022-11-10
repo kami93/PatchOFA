@@ -111,33 +111,49 @@ CLASSES_COCOF = np.array([
     'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave',
     'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase',
     'scissors', 'teddy bear', 'hair drier', 'toothbrush', 'banner',
-    'blanket', 'branch', 'bridge', 'building-other', 'bush', 'cabinet',
-    'cage', 'cardboard', 'carpet', 'ceiling-other', 'ceiling-tile',
+    'blanket', 'branch', 'bridge', 'building', 'bush', 'cabinet',
+    'cage', 'cardboard', 'carpet', 'ceiling', 'ceiling tile',
     'cloth', 'clothes', 'clouds', 'counter', 'cupboard', 'curtain',
-    'desk-stuff', 'dirt', 'door-stuff', 'fence', 'floor-marble',
-    'floor-other', 'floor-stone', 'floor-tile', 'floor-wood',
-    'flower', 'fog', 'food-other', 'fruit', 'furniture-other', 'grass',
-    'gravel', 'ground-other', 'hill', 'house', 'leaves', 'light', 'mat',
-    'metal', 'mirror-stuff', 'moss', 'mountain', 'mud', 'napkin', 'net',
-    'paper', 'pavement', 'pillow', 'plant-other', 'plastic', 'platform',
+    'desk', 'dirt', 'door', 'fence', 'marble floor',
+    'other floor', 'stone floor', 'tile floor', 'wood floor',
+    'flower', 'fog', 'food', 'fruit', 'furniture', 'grass',
+    'gravel', 'ground', 'hill', 'house', 'leaves', 'light', 'mat',
+    'metal', 'mirror', 'moss', 'mountain', 'mud', 'napkin', 'net',
+    'paper', 'pavement', 'pillow', 'plant', 'plastic', 'platform',
     'playingfield', 'railing', 'railroad', 'river', 'road', 'rock', 'roof',
-    'rug', 'salad', 'sand', 'sea', 'shelf', 'sky-other', 'skyscraper',
-    'snow', 'solid-other', 'stairs', 'stone', 'straw', 'structural-other',
-    'table', 'tent', 'textile-other', 'towel', 'tree', 'vegetable',
-    'wall-brick', 'wall-concrete', 'wall-other', 'wall-panel',
-    'wall-stone', 'wall-tile', 'wall-wood', 'water-other', 'waterdrops',
-    'window-blind', 'window-other', 'wood', 'unknown'])
+    'rug', 'salad', 'sand', 'sea', 'shelf', 'sky', 'skyscraper',
+    'snow', 'solid', 'stairs', 'stone', 'straw', 'structural',
+    'table', 'tent', 'textile', 'towel', 'tree', 'vegetable',
+    'brick wall', 'concrete wall', 'other wall', 'panel wall',
+    'stone wall', 'tile wall', 'wood wall', 'water', 'waterdrops',
+    'blind window', 'other window', 'wood', 'unknown'])
 
 CLASSES_COCOC = np.array([
-    'electronic', 'appliance', 'food-things', 'furniture-things', 'indoor', 
+    'electronic', 'appliance', 'food things', 'furniture things', 'indoor', 
     'kitchen', 'accessory', 'animal', 'outdoor', 'person', 
-    'sports', 'vehicle', 'ceiling', 'floor', 'food-stuff', 
-    'furniture-stuff', 'raw material', 'textile', 'wall', 'window', 
+    'sports', 'vehicle', 'ceiling', 'floor', 'food stuff', 
+    'furniture stuff', 'raw material', 'textile', 'wall', 'window', 
     'building', 'ground', 'plant', 'sky', 'solid', 
     'structural', 'water', 'unknown'])
 
 CLASSES_COCO_SEEN = np.array(
-    ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'bear', 'zebra', 'giraffe', 'umbrella', 'handbag', 'tie', 'suitcase', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'pizza', 'donut', 'cake', 'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'hair drier', 'toothbrush', 'banner', 'blanket', 'branch', 'bridge', 'building', 'bush', 'cabinet', 'cage', 'cardboard', 'ceiling', 'tile ceiling', 'cloth', 'clothes', 'clouds', 'cupboard', 'curtain', 'desk', 'dirt', 'door', 'fence', 'marble floor', 'floor', 'stone floor', 'tile floor', 'wood floor', 'flower', 'fog', 'food', 'fruit', 'furniture', 'grass', 'ground', 'hill', 'house', 'leaves', 'light', 'mat', 'metal', 'mirror', 'moss', 'mountain', 'mud', 'napkin', 'net', 'paper', 'pavement', 'pillow', 'plant', 'plastic', 'platform', 'playingfield', 'railroad', 'river', 'roof', 'rug', 'salad', 'sand', 'sea', 'shelf', 'sky', 'skyscraper', 'snow', 'solid', 'stairs', 'stone', 'straw', 'structural', 'table', 'tent', 'textile', 'towel', 'tree', 'brick wall', 'concrete wall', 'panal wall', 'stone wall', 'tile wall', 'wood wall', 'water', 'waterdrops', 'blind window', 'window', 'wood', 'unknown'])
+    ['person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 
+    'truck', 'boat', 'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 
+    'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'bear', 'zebra', 'giraffe', 
+    'umbrella', 'handbag', 'tie', 'suitcase', 'snowboard', 'sports ball', 'kite', 'baseball bat', 
+    'baseball glove', 'skateboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 
+    'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'pizza', 'donut', 
+    'cake', 'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 
+    'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 
+    'clock', 'vase', 'scissors', 'hair drier', 'toothbrush', 'banner', 'blanket', 'branch', 'bridge', 
+    'building', 'bush', 'cabinet', 'cage', 'cardboard', 'ceiling', 'tile ceiling', 'cloth', 'clothes', 
+    'clouds', 'cupboard', 'curtain', 'desk', 'dirt', 'door', 'fence', 'marble floor', 'other floor', 'stone floor', 
+    'tile floor', 'wood floor', 'flower', 'fog', 'food', 'fruit', 'furniture', 'grass', 'ground', 'hill', 
+    'house', 'leaves', 'light', 'mat', 'metal', 'mirror', 'moss', 'mountain', 'mud', 'napkin', 'net', 'paper', 
+    'pavement', 'pillow', 'plant', 'plastic', 'platform', 'playingfield', 'railroad', 'river', 'roof', 'rug', 
+    'salad', 'sand', 'sea', 'shelf', 'sky', 'skyscraper', 'snow', 'solid', 'stairs', 'stone', 'straw', 'structural', 
+    'table', 'tent', 'textile', 'towel', 'tree', 'brick wall', 'other wall', 'panal wall', 'stone wall', 
+    'tile wall', 'wood wall', 'water', 'waterdrops', 'blind window', 'other window', 'wood', 'unknown'])
 
 CLASSES_COCO_UNSEEN = np.array([
     'frisbee', 'skateboard', 'cardboard', 'carrot', 'scissors', 
@@ -320,6 +336,7 @@ class SegmentationDataset(OFADataset):
                                                           flip=False,
                                                           transforms=[dict(type='Resize', keep_ratio=True),
                                                                       dict(type='RandomFlip')])
+            # self.image_transform = Resize(img_scale=(self.patch_image_size, self.patch_image_size), keep_ratio=False)
             self.downsample_gt_seg = transforms.Resize((self.patch_image_size//16, self.patch_image_size//16), transforms.InterpolationMode.NEAREST)
 
         prompt_prefix=self.cfg.prompt_prefix
@@ -339,10 +356,16 @@ class SegmentationDataset(OFADataset):
         if self.num_seg == 170+1:
             self.id2rawtext = [x for x in CLASSES_COCOF]
         elif self.num_seg == 26+1:
-            self.id2rawtext = CLASSES_COCOC_AUGMENTED
-            self.id2numtext = np.array([len(x) for x in CLASSES_COCOC_AUGMENTED])
-            self.id2offset = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(self.id2numtext)[:-1]])
+            # self.id2rawtext = CLASSES_COCOC_AUGMENTED
+            # self.id2numtext = np.array([len(x) for x in CLASSES_COCOC_AUGMENTED])
+            # self.id2offset = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(self.id2numtext)[:-1]])
+            # self.id2truetext = [x for x in CLASSES_COCOC]
+            self.id2rawtext = [x for x in CLASSES_COCOC]
         elif self.num_seg == 149+1:
+            # self.id2rawtext = CLASSES_ADE_AUGMENTED
+            # self.id2numtext = np.array([len(x) for x in CLASSES_ADE_AUGMENTED])
+            # self.id2offset = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(self.id2numtext)[:-1]])
+            # self.id2truetext = [x for x in CLASSES_ADE]
             self.id2rawtext = [x for x in CLASSES_ADE]
         elif self.num_seg == 15:
             self.id2rawtext = [x for x in CLASSES_COCO_UNSEEN]
@@ -362,13 +385,16 @@ class SegmentationDataset(OFADataset):
 
         if isinstance(self.id2rawtext[0], list):
             self.id2text = [self.encode_text(f" {x}") for x in flatten(self.id2rawtext)]
+            self.id2text_true = [self.encode_text(f" {x}") for x in self.id2truetext]
         else:
             self.id2text = [self.encode_text(f" {x}") for x in self.id2rawtext]
+            self.id2text_true = None
 
         self.text_length = torch.tensor([len(x) for x in self.id2text])
 
         self.id2seg = np.array([f'<seg_{idx}>' for idx in range(self.num_seg + 1)])
         self.seg2code = self.encode_text(" ".join(self.id2seg), use_bpe=False)
+        self.upsample_gt_seg = transforms.Resize((self.patch_image_size, self.patch_image_size), transforms.InterpolationMode.NEAREST)
 
     def encode_text(self, text, length=None, append_bos=False, append_eos=False, use_bpe=True):
         line = [self.bpe.encode(' {}'.format(word.strip())) if not word.startswith('<seg_') else word for word in text.strip().split()]
@@ -439,6 +465,15 @@ class SegmentationDataset(OFADataset):
             prev_output_item = torch.cat([self.bos_item, seg_ids_downsampled])
 
         else:
+            # img_dict = self.image_transform(results)
+            # img = img_dict.pop('img')
+            
+            # img = img[:, :, ::-1].copy() # to RGB
+            # img = self.image_normalize(img)
+            
+            # gt_semantic_seg = img_dict.pop('gt_semantic_seg')
+            # gt_semantic_seg = torch.from_numpy(gt_semantic_seg.astype(np.int64))
+
             img_dict = self.image_transform(results)
             img = img_dict.pop('img')[0]
             img = img[:, :, ::-1].copy() # to RGB
@@ -475,7 +510,10 @@ class SegmentationDataset(OFADataset):
         # build 
         src_item_2 = None
         if self.prompt_type == 'all':
-            prompt_ids = [idx for idx in range(len(self.id2text))]
+            if self.id2text_true is not None:
+                prompt_ids = [idx for idx in range(len(self.id2text_true))]
+            else:
+                prompt_ids = [idx for idx in range(len(self.id2text))]
 
             if self.prompt_order == 'random':
                 np.random.shuffle(prompt_ids)
@@ -490,7 +528,10 @@ class SegmentationDataset(OFADataset):
             if self.prompt is not None:
                 src_text += [self.prompt]
             
-            src_text += [self.id2text[idx] for idx in prompt_ids]
+            if self.id2text_true is not None:
+                src_text += [self.id2text_true[idx] for idx in prompt_ids]
+            else:
+                src_text += [self.id2text[idx] for idx in prompt_ids]
             src_text += [self.eos_item]
 
             src_item = torch.cat(src_text)
@@ -597,8 +638,41 @@ class SegmentationDataset(OFADataset):
                 fakeimage_ids = self.downsample_gt_seg(rand).reshape(-1).tolist()
             
             upsample_rand = self.downsample_gt_seg(rand).reshape(-1).tolist()
+            fakeimage_prev = fakeimage_target = self.seg2code[upsample_rand]
+
+        elif self.fakeimage_type.startswith('bilinear'):
+            if self.fakeimage_type == 'bilinear':
+                l, r = 1, 32
+            elif len(self.fakeimage_type.split('-')) == 3:
+                l, r = self.fakeimage_type.split('-')[1:3]
+                l, r = int(l), int(r)
+            else:
+                raise NotImplementedError
+
+            sh, sw = torch.randint(l,r,(2,))
+            sh, sw = sh.item(), sw.item()
+            rand = np.random.choice(self.num_seg, size=sh*sw, replace=True)
+            if isinstance(self.id2rawtext[0], list):
+                extended_rand = []
+                for class_id in rand:
+                    numtext = self.id2numtext[class_id]
+                    randint = np.random.randint(numtext)
+
+                    extended_class_id = self.id2offset[class_id] + randint
+                    extended_rand.append(extended_class_id)
+                extended_rand = np.array(extended_rand)
+                extended_rand = torch.from_numpy(extended_rand).reshape(1, 1, sh, sw)
+                fakeimage_ids = self.downsample_gt_seg(extended_rand).reshape(-1).tolist()
+                rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
+            
+            else:
+                rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
+                fakeimage_ids = self.downsample_gt_seg(rand).reshape(-1).tolist()
+            
+            upsample_rand = self.upsample_gt_seg(rand).reshape(-1).tolist()
+            downsample_rand = self.downsample_gt_seg(rand).reshape(-1).tolist()
             fakeimage_target = self.seg2code[upsample_rand]
-                
+            fakeimage_prev = self.seg2code[downsample_rand]
         else:
             raise NotImplementedError
 
@@ -606,10 +680,13 @@ class SegmentationDataset(OFADataset):
         embedbag_offsets = torch.tensor([self.text_length[idx] for idx in fakeimage_ids], dtype=torch.long).cumsum(dim=0)
 
         target = torch.cat([fakeimage_target, self.eos_item])
-        prev_output_tokens = torch.cat([self.bos_item, fakeimage_target])
+        prev_output_tokens = torch.cat([self.bos_item, fakeimage_prev])
 
         if self.fakeimage_prompt_type == 'all':
-            prompt_ids = [idx for idx in range(len(self.id2text))]
+            if self.id2text_true is not None:
+                prompt_ids = [idx for idx in range(len(self.id2text_true))]
+            else:
+                prompt_ids = [idx for idx in range(len(self.id2text))]
 
             if self.prompt_order == 'random':
                 np.random.shuffle(prompt_ids)
@@ -624,7 +701,10 @@ class SegmentationDataset(OFADataset):
             if self.prompt is not None:
                 src_text += [self.prompt]
             
-            src_text += [self.id2text[idx] for idx in prompt_ids]
+            if self.id2text_true is not None:
+                src_text += [self.id2text_true[idx] for idx in prompt_ids]
+            else:
+                src_text += [self.id2text[idx] for idx in prompt_ids]
             src_text += [self.eos_item]
             src_item = torch.cat(src_text)
 
@@ -737,3 +817,526 @@ class SegmentationDataset(OFADataset):
             dict: a mini-batch containing the data of the task
         """
         return collate(samples, pad_idx=self.pad, eos_idx=self.eos)
+
+
+CLASSES_ADE_AUGMENTED = [['wall',
+  'pane',
+  'wall socket',
+  'wall plug',
+  'electric outlet',
+  'electrical outlet',
+  'outlet',
+  'electric receptacle',
+  'plate',
+  'sockets'],
+ ['building',
+  'edifice',
+  'arcades',
+  'balcony',
+  'balustrade',
+  'bars',
+  'bell',
+  'chimney',
+  'column',
+  'dome',
+  'door',
+  'door frame',
+  'doors',
+  'dormer',
+  'double door',
+  'entrance',
+  'fire escape',
+  'garage door',
+  'gate',
+  'grille',
+  'metal shutter',
+  'metal shutters',
+  'pane',
+  'pipe',
+  'porch',
+  'railing',
+  'revolving door',
+  'roof',
+  'shop window',
+  'shutter',
+  'sign',
+  'skylight',
+  'statue',
+  'steps',
+  'terrace',
+  'tower',
+  'wall',
+  'window',
+  'windows'],
+ ['sky', 'cloud', 'clouds'],
+ ['floor', 'flooring'],
+ ['tree', 'branch', 'fruit', 'trunk'],
+ ['ceiling', 'beam'],
+ ['road', 'route', 'crosswalk'],
+ ['bed',
+  'base',
+  'bedpost',
+  'bedspring',
+  'drawer',
+  'footboard',
+  'headboard',
+  'ladder',
+  'leg',
+  'rail',
+  'safety rail',
+  'side',
+  'side rail'],
+ ['windowpane',
+  'window',
+  'casing',
+  'door',
+  'handle',
+  'interior casing',
+  'lower sash',
+  'muntin',
+  'pane',
+  'rail',
+  'sash',
+  'sash lock',
+  'shutter',
+  'sill',
+  'stile',
+  'upper sash',
+  'window'],
+ ['grass'],
+ ['cabinet',
+  'back',
+  'base',
+  'door',
+  'drawer',
+  'front',
+  'leg',
+  'panel',
+  'shelf',
+  'side',
+  'skirt',
+  'top'],
+ ['sidewalk', 'pavement'],
+ ['person',
+  'individual',
+  'someone',
+  'somebody',
+  'mortal',
+  'soul',
+  'back',
+  'head',
+  'left arm',
+  'left foot',
+  'left hand',
+  'left leg',
+  'left shoulder',
+  'neck',
+  'right arm',
+  'right foot',
+  'right hand',
+  'right leg',
+  'right shoulder',
+  'torso'],
+ ['earth', 'ground'],
+ ['door',
+  'door frame',
+  'handle',
+  'hinge',
+  'knob',
+  'lock',
+  'muntin',
+  'pane',
+  'panel',
+  'window',
+  'doorframe',
+  'doorcase',
+  'double door',
+  'door',
+  'door frame',
+  'handle',
+  'pane'],
+ ['table',
+  'apron',
+  'base',
+  'door',
+  'drawer',
+  'front',
+  'leg',
+  'pedestal',
+  'shelf',
+  'side',
+  'skirt',
+  'stretcher',
+  'top'],
+ ['mountain', 'mount'],
+ ['plant', 'flora', 'plant life', 'flower', 'leaf'],
+ ['curtain', 'drape', 'drapery', 'mantle', 'pall'],
+ ['chair',
+  'apron',
+  'arm',
+  'back',
+  'back pillow',
+  'base',
+  'foot rest',
+  'h-stretcher',
+  'leg',
+  'seat',
+  'seat base',
+  'seat cushion',
+  'skirt',
+  'stretcher'],
+ ['car',
+  'auto',
+  'automobile',
+  'machine',
+  'motorcar',
+  'bumper',
+  'door',
+  'fender',
+  'gas cap',
+  'handle',
+  'headlight',
+  'hood',
+  'license plate',
+  'logo',
+  'mirror',
+  'roof rack',
+  'taillight',
+  'wheel',
+  'window',
+  'windshield',
+  'wiper'],
+ ['water'],
+ ['painting', 'picture', 'frame'],
+ ['sofa',
+  'couch',
+  'lounge',
+  'apron',
+  'arm',
+  'back',
+  'back pillow',
+  'cushion',
+  'leg',
+  'seat',
+  'seat base',
+  'seat cushion',
+  'skirt'],
+ ['shelf', 'base', 'door', 'leg', 'shelf', 'side', 'top'],
+ ['house',
+  'balcony',
+  'balustrade',
+  'chimney',
+  'column',
+  'door',
+  'dormer',
+  'double door',
+  'garage door',
+  'pipe',
+  'railing',
+  'roof',
+  'shutter',
+  'steps',
+  'window',
+  'windows'],
+ ['sea', 'wave'],
+ ['mirror', 'frame'],
+ ['rug', 'carpet', 'carpeting'],
+ ['field', 'hay bale'],
+ ['armchair',
+  'apron',
+  'arm',
+  'back',
+  'back pillow',
+  'earmuffs',
+  'leg',
+  'seat',
+  'seat base',
+  'seat cushion',
+  'skirt',
+  'stretcher'],
+ ['seat', 'back', 'back pillow', 'seat cushion'],
+ ['fence', 'fencing', 'post', 'rail'],
+ ['desk', 'door', 'drawer', 'leg', 'shelf', 'side', 'top'],
+ ['rock', 'stone'],
+ ['wardrobe',
+  'closet',
+  'press',
+  'door',
+  'drawer',
+  'leg',
+  'shelf',
+  'side',
+  'top'],
+ ['lamp',
+  'aperture',
+  'arm',
+  'base',
+  'bulb',
+  'canopy',
+  'chain',
+  'column',
+  'cord',
+  'shade',
+  'tube'],
+ ['bathtub', 'bathing tub', 'bath', 'tub', 'faucet', 'overflot plate', 'tap'],
+ ['railing', 'rail'],
+ ['cushion'],
+ ['base', 'pedestal', 'stand'],
+ ['box', 'tissue'],
+ ['column', 'pillar', 'base', 'capital', 'shaft'],
+ ['signboard', 'sign'],
+ ['chest of drawers',
+  'chest',
+  'bureau',
+  'dresser',
+  'base',
+  'door',
+  'drawer',
+  'front',
+  'leg',
+  'mirror',
+  'side',
+  'skirt',
+  'top'],
+ ['counter'],
+ ['sand'],
+ ['sink', 'bowl', 'faucet', 'pedestal', 'tap'],
+ ['skyscraper', 'pane', 'window'],
+ ['fireplace', 'hearth', 'open fireplace'],
+ ['refrigerator', 'icebox', 'door', 'side'],
+ ['grandstand'],
+ ['path'],
+ ['stairs', 'steps', 'step'],
+ ['runway'],
+ ['case'],
+ ['pool table',
+  'billiard table',
+  'snooker table',
+  'base',
+  'bed',
+  'cabinet',
+  'corner pocket',
+  'leg',
+  'rail',
+  'side pocket'],
+ ['pillow'],
+ ['screen door'],
+ ['stairway', 'staircase', 'rung', 'step', 'stringer'],
+ ['river'],
+ ['bridge', 'span'],
+ ['bookcase', 'door', 'front', 'shelf', 'top'],
+ ['blind', 'screen', 'head rail', 'slats'],
+ ['coffee table', 'cocktail table', 'apron', 'drawer', 'leg', 'shelf', 'top'],
+ ['toilet',
+  'can',
+  'commode',
+  'crapper',
+  'pot',
+  'potty',
+  'stool',
+  'throne',
+  'bowl',
+  'cistern',
+  'lid'],
+ ['flower'],
+ ['book'],
+ ['hill'],
+ ['bench', 'leg'],
+ ['countertop'],
+ ['stove',
+  'kitchen stove',
+  'range',
+  'kitchen range',
+  'cooking stove',
+  'burner',
+  'button panel',
+  'dial',
+  'drawer',
+  'oven',
+  'stove'],
+ ['palm', 'palm tree'],
+ ['kitchen island'],
+ ['computer',
+  'computing machine',
+  'computing device',
+  'data processor',
+  'electronic computer',
+  'information processing system',
+  'computer case',
+  'keyboard',
+  'monitor',
+  'mouse',
+  'speaker'],
+ ['swivel chair', 'arm', 'armrest', 'back', 'base', 'piston', 'seat'],
+ ['boat', 'window'],
+ ['bar'],
+ ['arcade machine'],
+ ['hovel'],
+ ['bus',
+  'autobus',
+  'coach',
+  'charabanc',
+  'double-decker',
+  'jitney',
+  'motorbus',
+  'motorcoach',
+  'omnibus',
+  'passenger vehicle',
+  'door',
+  'headlight',
+  'license plate',
+  'mirror',
+  'taillight',
+  'wheel',
+  'window',
+  'windshield'],
+ ['towel'],
+ ['light',
+  'light source',
+  'aperture',
+  'backplate',
+  'bulb',
+  'canopy',
+  'diffusor',
+  'shade'],
+ ['truck',
+  'motortruck',
+  'headlight',
+  'license plate',
+  'mirror',
+  'wheel',
+  'window',
+  'windshield'],
+ ['tower'],
+ ['chandelier',
+  'pendant',
+  'pendent',
+  'arm',
+  'bulb',
+  'canopy',
+  'chain',
+  'shade'],
+ ['awning', 'sunshade', 'sunblind'],
+ ['streetlight', 'street lamp', 'lamp housing'],
+ ['booth'],
+ ['television receiver',
+  'television',
+  'television set',
+  'tv',
+  'tv set',
+  'idiot box',
+  'boob tube',
+  'telly',
+  'goggle box',
+  'screen'],
+ ['airplane',
+  'aeroplane',
+  'plane',
+  'fuselage',
+  'landing gear',
+  'stabilizer',
+  'turbine engine',
+  'wing'],
+ ['dirt track'],
+ ['apparel', 'wearing apparel', 'dress', 'clothes'],
+ ['pole'],
+ ['land', 'ground', 'soil'],
+ ['bannister', 'banister', 'balustrade', 'balusters', 'handrail'],
+ ['escalator'],
+ ['ottoman',
+  'pouf',
+  'pouffe',
+  'puff',
+  'hassock',
+  'leg',
+  'seat',
+  'seat base',
+  'seat cushion'],
+ ['bottle', 'base', 'cap', 'label', 'neck'],
+ ['buffet'],
+ ['poster', 'posting', 'placard', 'notice', 'bill', 'card'],
+ ['stage'],
+ ['van',
+  'door',
+  'headlight',
+  'license plate',
+  'mirror',
+  'taillight',
+  'wheel',
+  'window',
+  'windshield'],
+ ['ship'],
+ ['fountain'],
+ ['conveyer belt'],
+ ['canopy'],
+ ['washer'],
+ ['plaything', 'toy'],
+ ['swimming pool'],
+ ['stool', 'apron', 'footrest', 'leg', 'seat', 'stretcher'],
+ ['barrel', 'cask'],
+ ['basket', 'handbasket'],
+ ['waterfall'],
+ ['tent'],
+ ['bag',
+  'traveling bag',
+  'travelling bag',
+  'grip',
+  'suitcase',
+  'handbag',
+  'pocketbook',
+  'purse'],
+ ['minibike', 'motorbike', 'license plate', 'wheel'],
+ ['cradle'],
+ ['oven', 'button panel', 'dial', 'door'],
+ ['pool ball', 'ball'],
+ ['food', 'solid food'],
+ ['step', 'stair'],
+ ['tank'],
+ ['trade name', 'brand name', 'brand', 'marque'],
+ ['microwave',
+  'microwave oven',
+  'button',
+  'button panel',
+  'buttons',
+  'dial',
+  'display',
+  'door',
+  'screen'],
+ ['pot', 'flowerpot'],
+ ['animal', 'animate being', 'beast', 'brute', 'creature', 'fauna'],
+ ['bicycle', 'bike', 'wheel', 'cycle'],
+ ['lake'],
+ ['dishwasher', 'dish washer', 'dishwashing machine', 'button panel', 'door'],
+ ['screen'],
+ ['blanket', 'cover'],
+ ['sculpture'],
+ ['hood', 'exhaust hood', 'body', 'filter', 'vent'],
+ ['sconce', 'arm', 'backplate', 'bulb', 'shade'],
+ ['vase'],
+ ['traffic light', 'traffic signal', 'stoplight', 'housing', 'pole'],
+ ['tray'],
+ ['ashcan',
+  'trash can',
+  'garbage can',
+  'wastebin',
+  'ash bin',
+  'ash-bin',
+  'ashbin',
+  'dustbin',
+  'trash barrel',
+  'trash bin',
+  'can',
+  'tin',
+  'tin can'],
+ ['fan', 'blade', 'canopy', 'motor', 'shade', 'tube'],
+ ['pier'],
+ ['screen', 'crt screen'],
+ ['plate'],
+ ['monitor', 'monitoring device', 'screen'],
+ ['bulletin board', 'notice board', ['board', 'plank']],
+ ['shower'],
+ ['radiator'],
+ ['glass', 'drinking glass', 'base', 'bowl', 'opening', 'stem'],
+ ['clock', 'face'],
+ ['flag'],
+ ['unknown']]

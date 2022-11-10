@@ -229,6 +229,15 @@ class SegCriterionV3Config(FairseqDataclass):
     unlabeled_loss_type: str = field(
         default='ce', metadata={"help": "ce | focal"}
     )
+    resnet_topk: int = field(
+        default=3, metadata={"help": "filtering with topk adjacent resnet features"}
+    )
+    resnet_prob_temperature: float = field(
+        default=1.0, metadata={"help": "resnet softmax temperature"}
+    )
+    resnet_iters: int = field(
+        default=0, metadata={"help": "resnet filtering iterations"}
+    )
     
 def resolve_str_true_false(x):
     x = x.lower()
@@ -342,7 +351,10 @@ class SegCriterionV3(FairseqCriterion):
         mask_cosine_criterion='all',
         mask_threshold_criterion='all',
         labeled_loss_type='ce',
-        unlabeled_loss_type='ce'
+        unlabeled_loss_type='ce',
+        resnet_topk=3,
+        resnet_prob_temperature=1.0,
+        resnet_iters=0,
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -374,6 +386,10 @@ class SegCriterionV3(FairseqCriterion):
         self.full_context_alignment = resolve_str_true_false(full_context_alignment)
         self.init_seg_with_text = resolve_str_true_false(init_seg_with_text)
         self.sliding_inference = True
+        
+        self.resnet_topk = resnet_topk
+        self.resnet_prob_temperature = resnet_prob_temperature
+        self.resnet_iters = resnet_iters
         
         self.mask_cosine_criterion = mask_cosine_criterion
         self.mask_threshold_criterion = mask_threshold_criterion
@@ -438,6 +454,7 @@ class SegCriterionV3(FairseqCriterion):
                 seg_loss, metrics, ntokens = compute_seg_loss(model, seg_output, sample, update_num, reduce=reduce, ema_model=ema_model)
 
         elif self.alpha != 1.0 and model.training:
+            assert(False)
             net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment, aux_input=sample["aux_input"])
             labeled_output = net_output[1].get("aux_output")
             labeled_loss = self.compute_labeled_loss(model, labeled_output, sample, update_num, reduce=reduce)
@@ -445,7 +462,7 @@ class SegCriterionV3(FairseqCriterion):
             loss = (1.0 - self.effective_alpha) * labeled_loss + self.effective_alpha * seg_loss
         
         elif model.training:
-            net_output = model(**sample["net_input"])
+            net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment)
             labeled_loss = net_output[0].new_zeros(size=(1, ))
             seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
             loss = seg_loss
@@ -479,9 +496,11 @@ class SegCriterionV3(FairseqCriterion):
                     w_cut_per_region = [w_overlap//num_w_overlap_region if w_i >= (w_overlap % num_w_overlap_region) else w_overlap//num_w_overlap_region+1 for w_i in range(num_w_overlap_region)]
                     w_cut_per_region = [(math.floor(w_cut/2), math.ceil(w_cut/2)) for w_cut in w_cut_per_region]
 
+                resnet_filtered_probability_list = []
                 x_list = []
                 for h_i in range(num_h_slice):
                     x_list_w = []
+                    resnet_filtered_probability_list_w = []
                     for w_i in range(num_w_slice):
                         h_offset = h_offset_list[h_i]
                         w_offset = w_offset_list[w_i]
@@ -489,20 +508,57 @@ class SegCriterionV3(FairseqCriterion):
                         _patch_images = patch_images[..., h_offset:h_offset+short_side, w_offset:w_offset+short_side]
                         
                         sample["net_input"]["patch_images"] = _patch_images
-                        _x, extra = model(**sample["net_input"])
+                        _x, extra = model(**sample["net_input"], full_context_alignment=self.full_context_alignment)
                         
+
+                        if self.resnet_iters > 0:                            
+                            resnet_feature = extra['encoder_returns']['image_embed_before_proj'][0]
+                            resnet_feature_norm = F.normalize(resnet_feature, dim=-1)
+                            cosine_sim = resnet_feature_norm @ resnet_feature_norm.transpose(-1, -2)
+                            _, topk_ind = torch.topk(cosine_sim, k=self.resnet_topk, dim=-1)
+                            bsz, seqlen = topk_ind.shape[:2]
+                            batch_ind = torch.arange(bsz).unsqueeze(-1).unsqueeze(-1).expand(bsz, seqlen, self.resnet_topk)
+                            
+                            resnet_prob = (_x / self.resnet_prob_temperature).softmax(-1)
+                            for _ in range(self.resnet_iters):
+                                resnet_prob_topk = resnet_prob[batch_ind, topk_ind]
+                                resnet_prob = resnet_prob_topk.mean(dim=-2)
+                            
+                            resnet_prob = torch.cat([resnet_prob, resnet_prob.new_zeros(size=(bsz, 1, resnet_prob.size(-1)))], dim=1) # fake eos token
+                            resnet_filtered_probability_list_w.append(resnet_prob)
                         x_list_w.append(_x)
+                        
+                    resnet_filtered_probability_list.append(resnet_filtered_probability_list_w)
                     x_list.append(x_list_w)
-
+                    
                 net_output = (x_list, extra)
-
+                
+                extra['resnet_filtered_probability'] = resnet_filtered_probability_list
                 extra['h_cut_per_region'] = h_cut_per_region
                 extra['w_cut_per_region'] = w_cut_per_region
                 extra['num_h_slice'] = num_h_slice
                 extra['num_w_slice'] = num_w_slice
             
             else:
-                net_output = model(**sample["net_input"])
+                net_output = model(**sample["net_input"], full_context_alignment=self.full_context_alignment)
+            
+                if self.resnet_iters > 0:
+                    _x, extra = net_output
+                    
+                    resnet_feature = extra['encoder_returns']['image_embed_before_proj'][0]
+                    resnet_feature_norm = F.normalize(resnet_feature, dim=-1)
+                    cosine_sim = resnet_feature_norm @ resnet_feature_norm.transpose(-1, -2)
+                    _, topk_ind = torch.topk(cosine_sim, k=self.resnet_topk, dim=-1)
+                    bsz, seqlen = topk_ind.shape[:2]
+                    batch_ind = torch.arange(bsz).unsqueeze(-1).unsqueeze(-1).expand(bsz, seqlen, self.resnet_topk)
+                    
+                    resnet_prob = (_x / self.resnet_prob_temperature).softmax(-1)
+                    for _ in range(self.resnet_iters):
+                        resnet_prob_topk = resnet_prob[batch_ind, topk_ind]
+                        resnet_prob = resnet_prob_topk.mean(dim=-2)
+                    resnet_prob = torch.cat([resnet_prob, resnet_prob.new_zeros(size=(bsz, 1, resnet_prob.size(-1)))], dim=1) # fake eos token
+                    
+                    extra['resnet_filtered_probability'] = resnet_prob
             
             labeled_loss = torch.zeros(size=(1, ), device='cuda')
             seg_loss, metrics, ntokens = compute_seg_loss(model, net_output, sample, update_num, reduce=reduce, ema_model=ema_model)
@@ -550,7 +606,7 @@ class SegCriterionV3(FairseqCriterion):
         # lprobs = model.get_normalized_probs(net_output, log_probs=False)
         logits, extra = net_output
         logits = logits.float()
-        
+        logits = self.upsample_logits(logits) # bilinear upsample
         penultimate = extra['penultimate']
         
         target = sample.get('text2seg_target')
@@ -831,46 +887,61 @@ class SegCriterionV3(FairseqCriterion):
             num_h_slice = extra['num_h_slice']
             num_w_slice = extra['num_w_slice']
             
-            _classifier_scores_h_list = []
-            for h_i in range(num_h_slice):
-                _classifier_scores_w_list = []
-                for w_i in range(num_w_slice):
-                    _classifier_scores_lowres = classifier_scores_lowres[h_i][w_i]
-                    _classifier_scores = self.upsample_logits(_classifier_scores_lowres, hp=hp, wp=wp, h=h, w=w) # bilinear upsample
-                    
-                    _classifier_scores_image, _classifier_scores_eos = _classifier_scores[:, :-1], _classifier_scores[:, -1:]
-                    _classifier_scores_image = rearrange(_classifier_scores_image, 'b (h w) d -> b h w d', h=short_side, w=short_side)
-                    
-                    if h_i == 0:
-                        _classifier_scores_image = _classifier_scores_image[:, :short_side-h_cut_per_region[h_i][0], :, :]
-                    
-                    elif h_i == num_h_slice-1:
-                        _classifier_scores_image = _classifier_scores_image[:, h_cut_per_region[h_i-1][1]:, :, :]
-                    
-                    else:
-                        _classifier_scores_image = _classifier_scores_image[:, h_cut_per_region[h_i-1][1]:short_side-h_cut_per_region[h_i][0], :, :]
-                    
-                    if w_i == 0:
-                        _classifier_scores_image = _classifier_scores_image[:, :, :short_side-w_cut_per_region[w_i][0], :]
-                    
-                    elif w_i == num_w_slice-1:
-                        _classifier_scores_image = _classifier_scores_image[:, :, w_cut_per_region[w_i-1][1]:, :]
-                    
-                    else:
-                        _classifier_scores_image = _classifier_scores_image[:, :, w_cut_per_region[w_i-1][1]:short_side-w_cut_per_region[w_i][0], :]
+            def seam_logits(scores_lowres):
+                _classifier_scores_h_list = []
+                for h_i in range(num_h_slice):
+                    _classifier_scores_w_list = []
+                    for w_i in range(num_w_slice):
+                        _classifier_scores_lowres = scores_lowres[h_i][w_i]
+                        _classifier_scores = self.upsample_logits(_classifier_scores_lowres, hp=hp, wp=wp, h=h, w=w) # bilinear upsample
+                        
+                        _classifier_scores_image, _classifier_scores_eos = _classifier_scores[:, :-1], _classifier_scores[:, -1:]
+                            
+                        _classifier_scores_image = rearrange(_classifier_scores_image, 'b (h w) d -> b h w d', h=short_side, w=short_side)
+                        
+                        if h_i == 0:
+                            _classifier_scores_image = _classifier_scores_image[:, :short_side-h_cut_per_region[h_i][0], :, :]
+                        
+                        elif h_i == num_h_slice-1:
+                            _classifier_scores_image = _classifier_scores_image[:, h_cut_per_region[h_i-1][1]:, :, :]
+                        
+                        else:
+                            _classifier_scores_image = _classifier_scores_image[:, h_cut_per_region[h_i-1][1]:short_side-h_cut_per_region[h_i][0], :, :]
+                        
+                        if w_i == 0:
+                            _classifier_scores_image = _classifier_scores_image[:, :, :short_side-w_cut_per_region[w_i][0], :]
+                        
+                        elif w_i == num_w_slice-1:
+                            _classifier_scores_image = _classifier_scores_image[:, :, w_cut_per_region[w_i-1][1]:, :]
+                        
+                        else:
+                            _classifier_scores_image = _classifier_scores_image[:, :, w_cut_per_region[w_i-1][1]:short_side-w_cut_per_region[w_i][0], :]
+                
+                        _classifier_scores_w_list.append(_classifier_scores_image)
+                        
+                    _classifier_scores_w = torch.cat(_classifier_scores_w_list, dim=2)
+                    _classifier_scores_h_list.append(_classifier_scores_w)
+                
+                _classifier_scores = torch.cat(_classifier_scores_h_list, dim=1)
+                _classifier_scores = rearrange(_classifier_scores, 'b h w d -> b (h w) d')
+                
+                _classifier_scores = torch.cat((_classifier_scores, _classifier_scores_eos), dim=1)
+
+                return _classifier_scores
+
+            classifier_scores = seam_logits(classifier_scores_lowres)
             
-                    _classifier_scores_w_list.append(_classifier_scores_image)
-                    
-                _classifier_scores_w = torch.cat(_classifier_scores_w_list, dim=2)
-                _classifier_scores_h_list.append(_classifier_scores_w)
-            
-            _classifier_scores_h = torch.cat(_classifier_scores_h_list, dim=1)
-            _classifier_scores_h = rearrange(_classifier_scores_h, 'b h w d -> b (h w) d')
-            
-            classifier_scores = torch.cat((_classifier_scores_h, _classifier_scores_eos), dim=1)
+            resnet_filtered_probability_list = extra.get("resnet_filtered_probability")
+            if len(resnet_filtered_probability_list[0]) > 0:
+                resnet_filtered_probability = seam_logits(resnet_filtered_probability_list)
+            else:
+                resnet_filtered_probability = None
         
         else:
             classifier_scores = self.upsample_logits(classifier_scores_lowres, hp=hp, wp=wp, h=h, w=w) # bilinear upsample
+            resnet_filtered_probability = extra.get("resnet_filtered_probability")
+            if resnet_filtered_probability is not None:
+                resnet_filtered_probability = self.upsample_logits(resnet_filtered_probability, hp=hp, wp=wp, h=h, w=w) # bilinear upsample
 
         target_shape = target.shape
         assert target_shape == classifier_scores.shape[:-1]
@@ -899,6 +970,15 @@ class SegCriterionV3(FairseqCriterion):
             metrics["area_label_lowres"] = area_label_lowres
             metrics["area_union_lowres"] = area_union_lowres
 
+        if resnet_filtered_probability is not None:
+            resnet_filtered_probability = resnet_filtered_probability[~sample_masks]
+
+            area_intersect, area_pred_label, area_label, area_union = self.compute_metric(resnet_filtered_probability.detach(), target.detach())
+            metrics["area_intersect_resnet_filtered"] = area_intersect
+            metrics["area_pred_label_resnet_filtered"] = area_pred_label
+            metrics["area_label_resnet_filtered"] = area_label
+            metrics["area_union_resnet_filtered"] = area_union
+            
         # assert self.student_temperature == 1.0 # to avoid mistakes...
         if self.upscale_lprobs:
             loss = F.cross_entropy(classifier_scores / self.student_temperature, target.detach(), label_smoothing=self.eps) # just for display
@@ -952,7 +1032,7 @@ class SegCriterionV3(FairseqCriterion):
             elif self.output_classes == 171:
                 CLASSES = CLASSES_COCOF
             elif self.output_classes == 27:
-                CLASSES = CLASSES_COCOC_AUGMENTED
+                CLASSES = CLASSES_COCOC
             elif self.output_classes == 15:
                 CLASSES = CLASSES_COCO_UNSEEN
             elif self.output_classes == 156:
@@ -1160,6 +1240,46 @@ class SegCriterionV3(FairseqCriterion):
             metrics.log_derived("mIoU_lowres", compute_mean_iou_lowres)
             metrics.log_derived("mAcc_lowres", compute_mean_acc_lowres)
 
+        if "area_intersect_resnet_filtered" in logging_outputs[0]:
+            area_intersect_resnet_filtered_sum = sum(log.get("area_intersect_resnet_filtered", 0) for log in logging_outputs)
+            area_pred_label_resnet_filtered_sum = sum(log.get("area_pred_label_resnet_filtered", 0) for log in logging_outputs)
+            area_label_sum_resnet_filtered = sum(log.get("area_label_resnet_filtered", 0) for log in logging_outputs)
+            area_union_sum_resnet_filtered = sum(log.get("area_union_resnet_filtered", 0) for log in logging_outputs)
+
+            metrics.log_scalar_sum(
+                "_area_intersect_resnet_filtered", area_intersect_resnet_filtered_sum, 1
+            )
+            metrics.log_scalar_sum(
+                "_area_pred_label_resnet_filtered", area_pred_label_resnet_filtered_sum, 1
+            )
+            metrics.log_scalar_sum(
+                "_area_label_resnet_filtered", area_label_sum_resnet_filtered, 1
+            )
+            metrics.log_scalar_sum(
+                "_area_union_resnet_filtered", area_union_sum_resnet_filtered, 1
+            )
+            
+            def compute_all_acc_resnet_filtered(meters):
+                all_acc = meters['_area_intersect_resnet_filtered'].sum.sum() / meters['_area_pred_label_resnet_filtered'].sum.sum()
+                all_acc = all_acc if isinstance(all_acc, float) else all_acc.item()
+                
+                return round(all_acc, 4)
+
+            def compute_mean_iou_resnet_filtered(meters):
+                miou = torch.nanmean(meters['_area_intersect_resnet_filtered'].sum / (meters['_area_union_resnet_filtered'].sum))
+                miou = miou if isinstance(miou, float) else miou.item()
+                
+                return round(miou, 4)
+
+            def compute_mean_acc_resnet_filtered(meters):
+                macc = torch.nanmean(meters['_area_intersect_resnet_filtered'].sum / (meters['_area_label_resnet_filtered'].sum))
+                macc = macc if isinstance(macc, float) else macc.item()
+                
+                return round(macc, 4)
+
+            metrics.log_derived("aAcc_resnet_filtered", compute_all_acc_resnet_filtered)
+            metrics.log_derived("mIoU_resnet_filtered", compute_mean_iou_resnet_filtered)
+            metrics.log_derived("mAcc_resnet_filtered", compute_mean_acc_resnet_filtered)
 
         if "area_intersect" in logging_outputs[0]:
             area_intersect_sum = sum(log.get("area_intersect", 0) for log in logging_outputs)
