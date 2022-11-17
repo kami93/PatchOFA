@@ -71,7 +71,7 @@ class SegmentationConfig(OFAConfig):
             "help": 'generation args for Self-critical sequence training, as JSON string'
         },
     )
-    fakeimage_type: str = field(
+    artificial_image_type: str = field(
         default='random',
         metadata={
             "help": 'random | gt_seg | upsampling | none'
@@ -95,7 +95,7 @@ class SegmentationConfig(OFAConfig):
             "help": 'prompt | random_all | all | random_20 | gt_seg'
         },
     )
-    fakeimage_prompt_type: str = field(
+    artificial_image_prompt_type: str = field(
         default='all',
         metadata={
             "help": 'prompt | all | gt_seg'
@@ -104,14 +104,6 @@ class SegmentationConfig(OFAConfig):
     num_seg_tokens: int = field(
         default=150,
         metadata={"help": "number of seg tokens"},
-    )
-    image_corruption_name: str = field(
-        default='none',
-        metadata={"help": "corruption name for robustness testing. one of: (gaussian_noise, shot_noise, impulse_noise, defocus_blur, glass_blur, motion_blur, zoom_blur, snow, frost, fog, brightness, contrast, elastic_transform, pixelate, jpeg_compression, speckle_noise, gaussian_blur, spatter, saturate)"},
-    )
-    image_corruption_severity: int = field(
-        default=1,
-        metadata={"help": "1-5"},
     )
     epoch_row_count: int = field(
         default=-1,
@@ -249,30 +241,6 @@ class SegmentationTask(OFATask):
     def valid_step(self, sample, model, criterion, **extra_kwargs):
         model.eval()
         loss, sample_size, logging_output = criterion(model, sample)
-
-        # hyps, refs = self._inference(self.sequence_generator, sample, model)
-
-        # pred_label = hyps
-        # label = refs - criterion.seg_id_offset
-        # num_classes = 151
-
-        # mask = (label != 150)
-        # pred_label = pred_label[mask]
-        # label = label[mask]
-
-        # intersect = pred_label[pred_label == label]
-        # area_intersect = torch.histc(
-        #     intersect.float(), bins=(num_classes), min=0, max=num_classes - 1)
-        # area_pred_label = torch.histc(
-        #     pred_label.float(), bins=(num_classes), min=0, max=num_classes - 1)
-        # area_label = torch.histc(
-        #     label.float(), bins=(num_classes), min=0, max=num_classes - 1)
-        # area_union = area_pred_label + area_label - area_intersect
-
-        # logging_output["_area_intersect_infer"] = area_intersect
-        # logging_output["_area_pred_label_infer"] = area_pred_label
-        # logging_output["_area_label_infer"] = area_label
-        # logging_output["_area_union_infer"] = area_union
 
         return loss, sample_size, logging_output
 

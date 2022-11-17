@@ -85,7 +85,6 @@ class SegOFAModel(TransformerModel):
         alignment_heads: Optional[int] = None,
         encoder_only: bool = False,
         aux_input: Optional[dict] = None,
-        net_input_aug: Optional[dict] = None,
     ):
         if classification_head_name is not None:
             features_only = True
@@ -132,32 +131,7 @@ class SegOFAModel(TransformerModel):
                     # for torch script only supports iteration
                     if k == classification_head_name:
                         x = head(sentence_representation)
-                        break
-
-        if net_input_aug is not None:
-            encoder_out_aug = self.encoder(
-            src_tokens=net_input_aug.get('src_tokens'),
-            src_lengths=net_input_aug.get('src_lengths'),
-            patch_images=patch_images,
-            patch_masks=patch_masks,
-            patch_images_2=patch_images_2,
-            token_embeddings=token_embeddings,
-            return_all_hiddens=return_all_hiddens,
-            sample_patch_num=sample_patch_num
-            )
-            
-            aug_output = self.decoder(
-                prev_output_tokens,
-                encoder_out=encoder_out_aug,
-                features_only=features_only,
-                full_context_alignment=full_context_alignment,
-                alignment_layer=alignment_layer,
-                alignment_heads=alignment_heads,
-                src_lengths=net_input_aug.get("src_lengths"),
-                return_all_hiddens=return_all_hiddens
-            )
-            
-            extra['aug_output'] = aug_output            
+                        break  
     
         if aux_input is not None:
             aux_encoder_out = self.encoder(
@@ -165,7 +139,7 @@ class SegOFAModel(TransformerModel):
                 src_lengths=aux_input.get("src_lengths"),
                 patch_images=aux_input.get("patch_images"),
                 patch_masks=aux_input.get("patch_masks"),
-                use_fake_image=True
+                use_artificial_image=True
             )
 
             aux_output = self.decoder(

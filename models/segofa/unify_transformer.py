@@ -58,14 +58,10 @@ def make_token_bucket_position(bucket_size, max_position=DEFAULT_MAX_SOURCE_POSI
     relative_pos = context_pos - memory_pos
     sign = torch.sign(relative_pos)
     mid = bucket_size // 2
-    # mid 는 bucket_size 의 절반, 즉 좌-우
     
     abs_pos = torch.where((relative_pos<mid) & (relative_pos > -mid), mid-1, torch.abs(relative_pos))
-    # 기준 토큰으로 거리가 mid 까지는 mid-1 을 집어넣고 (mid 보다 작은 값이기만 하면되서 아무 값이나 넣은듯, bucket_pos 계산하는 맨 마지막 라인 참고)
-    # 거리가 mid 넘어가면 실제 거리를 집어넣음 (바로 다음 라인에서 log 비율로 거리 결정하려고)
     
     log_pos = torch.ceil(torch.log(abs_pos/mid)/math.log((max_position-1)/mid) * (mid-1)) + mid
-    # mid 를 넘어가는 거리로부터는 log(abs_pos/mid) / log((max_position-1)/mid) 비율로 거
     
     log_pos = log_pos.int()
     bucket_pos = torch.where(abs_pos.le(mid), relative_pos, log_pos*sign).long()
@@ -299,17 +295,11 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--scale-heads', action='store_true',
                             help='scale heads')
         parser.add_argument('--scale-resids', action='store_true',
-                            help='scale resids')
-
-        parser.add_argument('--no-grad-image', type=str, default='false',
-                            help='true | false')
-        parser.add_argument('--l2-normalized-seg', type=str, default='false',
-                            help='true | false')
-        
+                            help='scale resids')        
         parser.add_argument('--num-seg-tokens', type=int, default=150,
                             help='Number of segmentation tokens')
         parser.add_argument('--decoder-type', type=str, default='surrogate',
-                            help='mlp | surrogate')
+                            help='surrogate')
         parser.add_argument('--tie-seg-projection', type=str, default='false',
                             help='Whether to tie the seg projection weights with seg tokens')
         
@@ -318,7 +308,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
         
         parser.add_argument('--patch-image-size', type=int, default=512,
                             help='patch_image_size')
-        
+        parser.add_argument('--orig-patch-image-size', type=int, default=512,
+                            help='patch_image_size')
         # fmt: on
 
     @classmethod

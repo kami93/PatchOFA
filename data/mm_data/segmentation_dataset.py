@@ -25,42 +25,6 @@ from torchvision.utils import save_image
 from data import data_utils
 from data.ofa_dataset import OFADataset
 
-from data.mm_data.corruptions import *
-
-corruption_tuple = (gaussian_noise, shot_noise, impulse_noise, defocus_blur,
-                    glass_blur, motion_blur, zoom_blur, snow, frost, fog,
-                    brightness, contrast, elastic_transform, pixelate, jpeg_compression,
-                    speckle_noise, gaussian_blur, spatter, saturate)
-corruption_dict = {corr_func.__name__: corr_func for corr_func in corruption_tuple}
-
-def flatten(l):
-    return [item for sublist in l for item in sublist]
-
-def corrupt(x, severity=1, corruption_name=None, corruption_number=-1, seed=None):
-    """
-    :param x: image to corrupt; a 224x224x3 numpy array in [0, 255]
-    :param severity: strength with which to corrupt x; an integer in [0, 5]
-    :param corruption_name: specifies which corruption function to call;
-    must be one of 'gaussian_noise', 'shot_noise', 'impulse_noise', 'defocus_blur',
-                    'glass_blur', 'motion_blur', 'zoom_blur', 'snow', 'frost', 'fog',
-                    'brightness', 'contrast', 'elastic_transform', 'pixelate', 'jpeg_compression',
-                    'speckle_noise', 'gaussian_blur', 'spatter', 'saturate';
-                    the last four are validation functions
-    :param corruption_number: the position of the corruption_name in the above list;
-    an integer in [0, 18]; useful for easy looping; 15, 16, 17, 18 are validation corruption numbers
-    :return: the image x corrupted by a corruption function at the given severity; same shape as input
-    """
-    rng = np.random.default_rng(seed)
-
-    if corruption_name:
-        x_corrupted = corruption_dict[corruption_name](Image.fromarray(x), severity, rng=rng)
-    elif corruption_number != -1:
-        x_corrupted = corruption_tuple[corruption_number](Image.fromarray(x), severity, rng=rng)
-    else:
-        raise ValueError("Either corruption_name or corruption_number must be passed")
-
-    return np.uint8(x_corrupted)
-
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 ImageFile.MAX_IMAGE_PIXELS = None
 Image.MAX_IMAGE_PIXELS = None
@@ -205,16 +169,6 @@ def collate(samples, pad_idx, eos_idx):
     src_tokens = merge("source")
     src_lengths = torch.LongTensor([s["source"].ne(pad_idx).long().sum() for s in samples])
 
-    net_input_aug = None
-    if samples[0].get("source_2", None) is not None:
-        src_tokens_2 = merge("source_2")
-        src_lengths_2 = torch.LongTensor([s["source_2"].ne(pad_idx).long().sum() for s in samples])
-        net_input_aug = {
-            "src_tokens": src_tokens_2,
-            "src_lengths": src_lengths_2
-        }
-
-
     patch_images = torch.stack([sample['patch_image'] for sample in samples], dim=0)
     patch_masks = torch.cat([sample['patch_mask'] for sample in samples])
 
@@ -235,10 +189,6 @@ def collate(samples, pad_idx, eos_idx):
 
     else:
         ntokens = src_lengths.sum().item()
-
-    text_target = None
-    if samples[0].get("text_target", None) is not None:
-        text_target = merge("text_target")
 
     aux_input = None
     text2seg_target = None
@@ -277,10 +227,8 @@ def collate(samples, pad_idx, eos_idx):
             "patch_masks": patch_masks,
             "prev_output_tokens": prev_output_tokens
         },
-        "net_input_aug": net_input_aug,
         "aux_input": aux_input,
         "target": target,
-        "text_target": text_target,
         "downsampled_target": downsampled_target,
         "text2seg_target": text2seg_target
     }
@@ -336,7 +284,6 @@ class SegmentationDataset(OFADataset):
                                                           flip=False,
                                                           transforms=[dict(type='Resize', keep_ratio=True),
                                                                       dict(type='RandomFlip')])
-            # self.image_transform = Resize(img_scale=(self.patch_image_size, self.patch_image_size), keep_ratio=False)
             self.downsample_gt_seg = transforms.Resize((self.patch_image_size//16, self.patch_image_size//16), transforms.InterpolationMode.NEAREST)
 
         prompt_prefix=self.cfg.prompt_prefix
@@ -344,24 +291,18 @@ class SegmentationDataset(OFADataset):
             self.prompt = self.encode_text(f' {prompt_prefix.lstrip()}')
         else:
             self.prompt = None
-        self.prompt_order = self.cfg.prompt_order
 
-        self.pos_tgt_item = self.encode_text(" yes")
-        self.neg_tgt_item = self.encode_text(" no")
-        
-        self.fakeimage_type = cfg.fakeimage_type
-        self.prompt_type = cfg.prompt_type
-        self.fakeimage_prompt_type = cfg.fakeimage_prompt_type
+        self.artificial_image_type = cfg.artificial_image_type
         self.num_seg = cfg.num_seg_tokens # 150 (ade) 171 (coco-fine) 27 (coco-coarse)
-        if self.num_seg == 170+1:
+        if self.num_seg == 171:
             self.id2rawtext = [x for x in CLASSES_COCOF]
-        elif self.num_seg == 26+1:
+        elif self.num_seg == 27:
             # self.id2rawtext = CLASSES_COCOC_AUGMENTED
             # self.id2numtext = np.array([len(x) for x in CLASSES_COCOC_AUGMENTED])
             # self.id2offset = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(self.id2numtext)[:-1]])
             # self.id2truetext = [x for x in CLASSES_COCOC]
             self.id2rawtext = [x for x in CLASSES_COCOC]
-        elif self.num_seg == 149+1:
+        elif self.num_seg == 150:
             # self.id2rawtext = CLASSES_ADE_AUGMENTED
             # self.id2numtext = np.array([len(x) for x in CLASSES_ADE_AUGMENTED])
             # self.id2offset = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(self.id2numtext)[:-1]])
@@ -371,18 +312,12 @@ class SegmentationDataset(OFADataset):
             self.id2rawtext = [x for x in CLASSES_COCO_UNSEEN]
         elif self.num_seg == 156:
             self.id2rawtext = [x for x in CLASSES_COCO_SEEN]
-        elif self.num_seg == 168+1:
-            self.id2rawtext = [x for x in CLASSES_COCOC]
-            self.id2rawtext = self.id2rawtext + [x for x in CLASSES_ADE if x not in CLASSES_COCOC]
-        elif self.num_seg == 197+1:
-            self.id2rawtext = [x for x in CLASSES_COCOC]
-            self.id2rawtext = self.id2rawtext + [x for x in CLASSES_COCOF if x not in CLASSES_COCOC]
+        elif self.num_seg == 165:
+            self.id2rawtext = [x for x in CLASSES_COCO_UNSEEN]
+            self.id2rawtext = self.id2rawtext + [x for x in CLASSES_ADE if x not in CLASSES_COCO_UNSEEN]
         else:
             raise NotImplementedError
-        
-        self.image_corruption_name = self.cfg.image_corruption_name
-        self.image_corruption_severity = self.cfg.image_corruption_severity
-
+       
         if isinstance(self.id2rawtext[0], list):
             self.id2text = [self.encode_text(f" {x}") for x in flatten(self.id2rawtext)]
             self.id2text_true = [self.encode_text(f" {x}") for x in self.id2truetext]
@@ -429,19 +364,9 @@ class SegmentationDataset(OFADataset):
         patch_mask = torch.tensor([True])
 
         results = {}
-        # results['filename'] = filename
-        # results['ori_filename'] = results['img_info']['filename']
         results['img'] = image_arr
         results['img_shape'] = image_arr.shape
-        # results['ori_shape'] = image_arr.shape
-        # Set initial values for default meta_keys
-        # results['pad_shape'] = image_arr.shape
         results['scale_factor'] = 1.0
-        # num_channels = 1 if len(image_arr.shape) < 3 else image_arr.shape[2]
-        # results['img_norm_cfg'] = dict(
-        #     mean=np.zeros(num_channels, dtype=np.float32),
-        #     std=np.ones(num_channels, dtype=np.float32),
-        #     to_rgb=False)
 
         # avoid using underflow conversion
         segmentation_arr[segmentation_arr == 0] = 255
@@ -465,154 +390,65 @@ class SegmentationDataset(OFADataset):
             prev_output_item = torch.cat([self.bos_item, seg_ids_downsampled])
 
         else:
-            # img_dict = self.image_transform(results)
-            # img = img_dict.pop('img')
-            
-            # img = img[:, :, ::-1].copy() # to RGB
-            # img = self.image_normalize(img)
-            
-            # gt_semantic_seg = img_dict.pop('gt_semantic_seg')
-            # gt_semantic_seg = torch.from_numpy(gt_semantic_seg.astype(np.int64))
-
             img_dict = self.image_transform(results)
             img = img_dict.pop('img')[0]
             img = img[:, :, ::-1].copy() # to RGB
 
-            if self.image_corruption_name != 'none':
-                corrupted_img = corrupt(img, severity=self.image_corruption_severity, corruption_name=self.image_corruption_name, seed=int(uniq_id))
-                img = corrupted_img
-                
             img = self.image_normalize(img)
 
             gt_semantic_seg = img_dict.pop('gt_semantic_seg')[0]
             gt_semantic_seg = torch.from_numpy(gt_semantic_seg.astype(np.int64))
             
             downsampled_target=None
-            # prev_output_item=self.bos_item
             gt_semantic_seg_downsampled = self.downsample_gt_seg(gt_semantic_seg.unsqueeze(0)).flatten()
             seg_ids_downsampled = self.seg2code[gt_semantic_seg_downsampled]
-            # downsampled_target = torch.cat([seg_ids_downsampled, self.eos_item])
             prev_output_item = torch.cat([self.bos_item, seg_ids_downsampled])
 
         seg_ids = self.seg2code[gt_semantic_seg.flatten()]
         target = torch.cat([seg_ids, self.eos_item])
 
-
-        text_target = None
-        # text_target = self.seg2code[:150].repeat_interleave(repeats=self.text_length, dim=0)
-        
-        # target_on_final_token = False
-        # if target_on_final_token:
-        #     fill_idx = self.text_length[:150].cumsum(dim=0)-1
-        #     text_target = text_target.new_full(size=text_target.size(), fill_value=self.pad, dtype=torch.long)
-        #     text_target[fill_idx] = self.seg2code[:150]
-
         # build 
-        src_item_2 = None
-        if self.prompt_type == 'all':
-            if self.id2text_true is not None:
-                prompt_ids = [idx for idx in range(len(self.id2text_true))]
-            else:
-                prompt_ids = [idx for idx in range(len(self.id2text))]
-
-            if self.prompt_order == 'random':
-                np.random.shuffle(prompt_ids)
-            elif self.prompt_order == 'sorted':
-                prompt_ids.sort()
-            elif self.prompt_order == 'none':
-                pass
-            else:
-                raise NotImplementedError
-            
-            src_text = [self.bos_item]
-            if self.prompt is not None:
-                src_text += [self.prompt]
-            
-            if self.id2text_true is not None:
-                src_text += [self.id2text_true[idx] for idx in prompt_ids]
-            else:
-                src_text += [self.id2text[idx] for idx in prompt_ids]
-            src_text += [self.eos_item]
-
-            src_item = torch.cat(src_text)
-
-        elif self.prompt_type == 'gtseg':
-            raise NotImplementedError
-            # prompt_ids = gt_semantic_seg_downsampled.unique().tolist()
-
-        elif self.prompt_type == 'seg':
-            src_text = [self.bos_item]
-            if self.prompt is not None:
-                src_text += [self.prompt]
-
-            src_text += [self.seg2code[:self.num_seg], self.eos_item]
-            src_item = torch.cat(src_text)
-
-        elif self.prompt_type == 'prompt':
-            assert self.prompt is not None
-            src_item = torch.cat([self.bos_item, self.prompt, self.eos_item])
-
-        elif self.prompt_type == 'random_20':
-            if self.split == 'train':
-                prompt_ids = np.random.choice(self.num_seg, size=20).tolist()
-                src_text = torch.cat([self.id2text[idx] for idx in rand_idx])
-                src_item = torch.cat([self.bos_item, src_text, self.eos_item]) # src_item is the student (strong aug.)
-                
-                # rand_idx = np.random.choice(150, size=20)
-                src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
-                src_item_2 = torch.cat([self.bos_item, src_text, self.eos_item]) # src_item_2 is the teacher (weak aug.)
-            
-            else:
-                # self.prompt_type is 'all' during validation.
-                src_text = torch.cat([self.id2text[idx] for idx in range(self.num_seg)])
-                src_item = torch.cat([self.bos_item, src_text, self.eos_item])
-
+        if self.id2text_true is not None:
+            prompt_ids = [idx for idx in range(len(self.id2text_true))]
         else:
-            raise NotImplementedError
+            prompt_ids = [idx for idx in range(len(self.id2text))]
+        prompt_ids.sort()
+        
+        src_text = [self.bos_item]
+        if self.prompt is not None:
+            src_text += [self.prompt]
+        
+        if self.id2text_true is not None:
+            src_text += [self.id2text_true[idx] for idx in prompt_ids]
+        else:
+            src_text += [self.id2text[idx] for idx in prompt_ids]
+        src_text += [self.eos_item]
 
-        # Self-patch teacher index
-        # mask = seg_ids_downsampled.unsqueeze(0) == seg_ids_downsampled.unsqueeze(1)
-        
-        # rand = torch.randn(size=(len(seg_ids_downsampled), len(seg_ids_downsampled)))
-        
-        # batch_idx_1d = torch.arange(len(seg_ids_downsampled))
-        # batch_idx_2d = batch_idx_1d.unsqueeze(-1).expand(-1, len(seg_ids_downsampled))
-        
-        # perm = rand.argsort(-1)
+        src_item = torch.cat(src_text)
 
-        # mask_perm = mask[batch_idx_2d, perm]
-        # random_choice = mask_perm.max(-1)[1]
-        
-        # target_teacher = perm[batch_idx_1d, random_choice]
         example = {
             "id": uniq_id,
             "source": src_item,
-            "source_2": src_item_2,
             "patch_image": img,
             "patch_mask": patch_mask,
             "target": target,
-            "text_target": text_target,
             "downsampled_target": downsampled_target,
             "prev_output_tokens": prev_output_item
         }
 
-        if self.fakeimage_type == 'none':
+        if self.artificial_image_type == 'none':
             # no fake image
             return example
-        
-        elif self.fakeimage_type == 'gt_seg':
-            fakeimage_ids = gt_semantic_seg_downsampled.tolist()
-            fakeimage_target = self.seg2code[fakeimage_ids]
             
-        elif self.fakeimage_type == 'random':
-            fakeimage_ids = np.random.choice(self.num_seg, size=1024, replace=True).tolist()
-            fakeimage_target = self.seg2code[fakeimage_ids]
+        elif self.artificial_image_type == 'norand_k':
+            artificial_image_ids = np.random.choice(self.num_seg, size=1024, replace=True).tolist()
+            artificial_image_target = self.seg2code[artificial_image_ids]
 
-        elif self.fakeimage_type.startswith('upsampling'):
-            if self.fakeimage_type == 'upsampling':
-                l, r = 1, 12
-            elif len(self.fakeimage_type.split('-')) == 3:
-                l, r = self.fakeimage_type.split('-')[1:3]
+        elif self.artificial_image_type.startswith('rand_k'):
+            if self.artificial_image_type == 'rand_k':
+                l, r = 1, 33
+            elif len(self.artificial_image_type.split('-')) == 3:
+                l, r = self.artificial_image_type.split('-')[1:3]
                 l, r = int(l), int(r)
             else:
                 raise NotImplementedError
@@ -630,101 +466,43 @@ class SegmentationDataset(OFADataset):
                     extended_rand.append(extended_class_id)
                 extended_rand = np.array(extended_rand)
                 extended_rand = torch.from_numpy(extended_rand).reshape(1, 1, sh, sw)
-                fakeimage_ids = self.downsample_gt_seg(extended_rand).reshape(-1).tolist()
+                artificial_image_ids = self.downsample_gt_seg(extended_rand).reshape(-1).tolist()
                 rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
             
             else:
                 rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
-                fakeimage_ids = self.downsample_gt_seg(rand).reshape(-1).tolist()
-            
-            upsample_rand = self.downsample_gt_seg(rand).reshape(-1).tolist()
-            fakeimage_prev = fakeimage_target = self.seg2code[upsample_rand]
-
-        elif self.fakeimage_type.startswith('bilinear'):
-            if self.fakeimage_type == 'bilinear':
-                l, r = 1, 32
-            elif len(self.fakeimage_type.split('-')) == 3:
-                l, r = self.fakeimage_type.split('-')[1:3]
-                l, r = int(l), int(r)
-            else:
-                raise NotImplementedError
-
-            sh, sw = torch.randint(l,r,(2,))
-            sh, sw = sh.item(), sw.item()
-            rand = np.random.choice(self.num_seg, size=sh*sw, replace=True)
-            if isinstance(self.id2rawtext[0], list):
-                extended_rand = []
-                for class_id in rand:
-                    numtext = self.id2numtext[class_id]
-                    randint = np.random.randint(numtext)
-
-                    extended_class_id = self.id2offset[class_id] + randint
-                    extended_rand.append(extended_class_id)
-                extended_rand = np.array(extended_rand)
-                extended_rand = torch.from_numpy(extended_rand).reshape(1, 1, sh, sw)
-                fakeimage_ids = self.downsample_gt_seg(extended_rand).reshape(-1).tolist()
-                rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
-            
-            else:
-                rand = torch.from_numpy(rand).reshape(1, 1, sh, sw)
-                fakeimage_ids = self.downsample_gt_seg(rand).reshape(-1).tolist()
+                artificial_image_ids = self.downsample_gt_seg(rand).reshape(-1).tolist()
             
             upsample_rand = self.upsample_gt_seg(rand).reshape(-1).tolist()
             downsample_rand = self.downsample_gt_seg(rand).reshape(-1).tolist()
-            fakeimage_target = self.seg2code[upsample_rand]
-            fakeimage_prev = self.seg2code[downsample_rand]
+            artificial_image_target = self.seg2code[upsample_rand]
+            artificial_image_prev = self.seg2code[downsample_rand]
         else:
             raise NotImplementedError
 
-        embedbag_ids = torch.cat([self.id2text[idx] for idx in fakeimage_ids])
-        embedbag_offsets = torch.tensor([self.text_length[idx] for idx in fakeimage_ids], dtype=torch.long).cumsum(dim=0)
+        embedbag_ids = torch.cat([self.id2text[idx] for idx in artificial_image_ids])
+        embedbag_offsets = torch.tensor([self.text_length[idx] for idx in artificial_image_ids], dtype=torch.long).cumsum(dim=0)
 
-        target = torch.cat([fakeimage_target, self.eos_item])
-        prev_output_tokens = torch.cat([self.bos_item, fakeimage_prev])
+        target = torch.cat([artificial_image_target, self.eos_item])
+        prev_output_tokens = torch.cat([self.bos_item, artificial_image_prev])
 
-        if self.fakeimage_prompt_type == 'all':
-            if self.id2text_true is not None:
-                prompt_ids = [idx for idx in range(len(self.id2text_true))]
-            else:
-                prompt_ids = [idx for idx in range(len(self.id2text))]
-
-            if self.prompt_order == 'random':
-                np.random.shuffle(prompt_ids)
-            elif self.prompt_order == 'sorted':
-                prompt_ids.sort()
-            elif self.prompt_order == 'none':
-                pass
-            else:
-                raise NotImplementedError
-            
-            src_text = [self.bos_item]
-            if self.prompt is not None:
-                src_text += [self.prompt]
-            
-            if self.id2text_true is not None:
-                src_text += [self.id2text_true[idx] for idx in prompt_ids]
-            else:
-                src_text += [self.id2text[idx] for idx in prompt_ids]
-            src_text += [self.eos_item]
-            src_item = torch.cat(src_text)
-
-        elif self.fakeimage_prompt_type == 'gt_seg':
-            raise NotImplementedError
-
-        elif self.fakeimage_prompt_type == 'seg':
-            src_text = [self.bos_item]
-            if self.prompt is not None:
-                src_text += [self.prompt]
-
-            src_text += [self.seg2code[:self.num_seg], self.eos_item]
-            src_item = torch.cat(src_text)
-
-        elif self.fakeimage_prompt_type == 'prompt':
-            assert self.prompt is not None
-            src_item = torch.cat([self.bos_item, self.prompt, self.eos_item])
-
+        if self.id2text_true is not None:
+            prompt_ids = [idx for idx in range(len(self.id2text_true))]
         else:
-            raise NotImplementedError
+            prompt_ids = [idx for idx in range(len(self.id2text))]
+
+        prompt_ids.sort()
+        
+        src_text = [self.bos_item]
+        if self.prompt is not None:
+            src_text += [self.prompt]
+        
+        if self.id2text_true is not None:
+            src_text += [self.id2text_true[idx] for idx in prompt_ids]
+        else:
+            src_text += [self.id2text[idx] for idx in prompt_ids]
+        src_text += [self.eos_item]
+        src_item = torch.cat(src_text)
         
         example["text2seg_patch_image"] = embedbag_ids
         example["text2seg_patch_mask"] = embedbag_offsets
@@ -733,81 +511,6 @@ class SegmentationDataset(OFADataset):
         example["text2seg_prev_output_tokens"] = prev_output_tokens
 
         return example
-
-        # rand = random.randint(0, 149)
-        # text = CLASSES[rand]
-        # seg = self.id2seg[rand]
-        # segcode = self.seg2code[rand]
-        
-        # prob = random.random()
-
-        # if prob >= 0.5:
-        #     text2seg_prompt = f' " {text} "' + self.prompt
-        #     text2seg_source = self.encode_text(text2seg_prompt)
-        #     text2seg_src_item = torch.cat([self.bos_item, text2seg_source, self.eos_item])
-        #     example["text2seg_source"] = text2seg_src_item
-
-        #     text2seg_prev_output_item = torch.cat([self.bos_item, text2seg_source])
-        #     example["text2seg_prev_output_tokens"] = text2seg_prev_output_item
-
-        #     text2seg_target = torch.cat([text2seg_source, segcode.unsqueeze(0)])
-        #     text2seg_target[:-1] = self.tgt_dict.pad()
-        #     example["text2seg_target"] = text2seg_target
-        # else:
-        #     text2seg_prompt = f' " {seg} "' + self.prompt
-        #     text2seg_source = self.encode_text(text2seg_prompt)
-        #     text2seg_src_item = torch.cat([self.bos_item, text2seg_source, self.eos_item])
-        #     example["text2seg_source"] = text2seg_src_item
-            
-        #     target_text = self.encode_text(f" {text}")
-        #     text2seg_target = torch.cat([text2seg_source, target_text])
-        #     text2seg_target[:-len(target_text)] = self.tgt_dict.pad()
-        #     example["text2seg_target"] = text2seg_target
-
-        #     text2seg_prev_output_item = torch.cat([self.bos_item, text2seg_source, target_text])
-        #     example["text2seg_prev_output_tokens"] = text2seg_prev_output_item[:-1]
-
-
-        # rand0, rand1 = np.random.choice(150, size=2, replace=False)
-        # prob = random.random()
-        # if prob >= 0.5:
-        #     # Make Positive Pair
-        #     text = CLASSES[rand0]
-        #     seg = self.id2seg[rand0]
-        #     pos_pair = [text, seg]
-        #     pos_src_item = torch.cat([self.bos_item, self.get_src_item_given_pair(pos_pair), self.eos_item])
-            
-        #     example["text2seg_source"] = pos_src_item
-            
-        #     pos_prev_output_item = pos_src_item[:-1].clone()
-        #     pos_target_item = torch.cat([pos_prev_output_item[1:], self.pos_tgt_item])
-        #     pos_target_item[:-1] = self.tgt_dict.pad()
-            
-        #     example["text2seg_target"] = pos_target_item
-        #     example["text2seg_prev_output_tokens"] = pos_prev_output_item
-            
-        # else:
-        #     # Make Negative Pair
-        #     text = CLASSES[rand0]
-        #     seg = self.id2seg[rand1]
-        #     neg_pair = [text, seg]
-        #     neg_src_item = torch.cat([self.bos_item, self.get_src_item_given_pair(neg_pair), self.eos_item])
-            
-        #     example["text2seg_source"] = neg_src_item
-            
-        #     neg_prev_output_item = neg_src_item[:-1].clone()
-        #     neg_target_item = torch.cat([neg_prev_output_item[1:], self.neg_tgt_item])
-        #     neg_target_item[:-1] = self.tgt_dict.pad()
-            
-        #     example["text2seg_target"] = neg_target_item
-        #     example["text2seg_prev_output_tokens"] = neg_prev_output_item
-
-    def get_src_item_given_pair(self, pair):
-        np.random.shuffle(pair)
-        src_item = self.encode_text(
-            ' does text1 " {} " and text2 " {} " have the same semantics?'.format(pair[0], pair[1]),
-        )
-        return src_item
 
     def collater(self, samples, pad_to_length=None):
         """Merge a list of samples to form a mini-batch.

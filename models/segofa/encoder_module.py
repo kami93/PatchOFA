@@ -67,14 +67,10 @@ def make_token_bucket_position(bucket_size, max_position=DEFAULT_MAX_SOURCE_POSI
     relative_pos = context_pos - memory_pos
     sign = torch.sign(relative_pos)
     mid = bucket_size // 2
-    # mid 는 bucket_size 의 절반, 즉 좌-우
     
     abs_pos = torch.where((relative_pos<mid) & (relative_pos > -mid), mid-1, torch.abs(relative_pos))
-    # 기준 토큰으로 거리가 mid 까지는 mid-1 을 집어넣고 (mid 보다 작은 값이기만 하면되서 아무 값이나 넣은듯, bucket_pos 계산하는 맨 마지막 라인 참고)
-    # 거리가 mid 넘어가면 실제 거리를 집어넣음 (바로 다음 라인에서 log 비율로 거리 결정하려고)
     
     log_pos = torch.ceil(torch.log(abs_pos/mid)/math.log((max_position-1)/mid) * (mid-1)) + mid
-    # mid 를 넘어가는 거리로부터는 log(abs_pos/mid) / log((max_position-1)/mid) 비율로 거
     
     log_pos = log_pos.int()
     bucket_pos = torch.where(abs_pos.le(mid), relative_pos, log_pos*sign).long()
@@ -260,7 +256,6 @@ class TransformerEncoder(FairseqEncoder):
 
         self.entangle_position_embedding = args.entangle_position_embedding
         
-        self.no_grad_image = resolve_str_true_false(args.no_grad_image)
         self.freeze_encoder_transformer = resolve_str_true_false(args.freeze_encoder_transformer)
         self.freeze_encoder_transformer_layers = args.freeze_encoder_transformer_layers
 
@@ -352,11 +347,9 @@ class TransformerEncoder(FairseqEncoder):
             image_num_patches = sample_patch_num
             image_padding_mask = image_padding_mask.gather(1, patch_orders)
             image_position_ids = image_position_ids.gather(1, patch_orders)
-        # orig_num_patches = (self.orig_patch_image_size // 16) ** 2
-        # orig_hw= self.orig_patch_image_size // 16
-        orig_num_patches = (512 // 16) ** 2
-        orig_hw= 512 // 16
-        # if getattr(self.args, "interpolate_position", False) and image_num_patches > orig_num_patches:
+
+        orig_num_patches = (self.orig_patch_image_size // 16) ** 2
+        orig_hw= self.orig_patch_image_size // 16
         if image_num_patches > orig_num_patches:
             old_image_position_ids = torch.arange(orig_hw).unsqueeze(0).expand(orig_hw, orig_hw) + \
                                      torch.arange(orig_hw).unsqueeze(1) * self.args.image_bucket_size + 1
@@ -397,27 +390,6 @@ class TransformerEncoder(FairseqEncoder):
     ):
         # embed tokens and positions
         if token_embedding is None:
-            # bsz, length = src_tokens.size()
-            # src_tokens_flat = src_tokens.flatten()
-            
-            # offset = self.dictionary.index('<seg_0>')
-            # mask = src_tokens_flat < offset
-            
-            # lang_tokens = src_tokens_flat[mask]
-            # lang_embedding = self.embed_tokens(lang_tokens)
-            
-            # seg_tokens = src_tokens_flat[~mask] - offset
-            # seg_embedding = self.seg_embed_tokens(seg_tokens)
-            
-            # token_embedding = torch.cat([lang_embedding, seg_embedding], dim=0)
-            
-            # all_idx = torch.arange(bsz*length)
-            # lang_idx = all_idx[mask]
-            # seg_idx = all_idx[~mask]
-            # restore_idx = torch.cat([lang_idx, seg_idx], dim=0).argsort()
-            
-            # token_embedding = token_embedding[restore_idx]
-            # token_embedding = token_embedding.reshape(bsz, length, -1)
             token_embedding = self.embed_tokens(src_tokens)
 
         x = embed = self.embed_scale * token_embedding
@@ -477,7 +449,7 @@ class TransformerEncoder(FairseqEncoder):
         return_all_hiddens: bool = False,
         token_embeddings: Optional[torch.Tensor] = None,
         sample_patch_num: Optional[int] = None,
-        use_fake_image: bool=False,
+        use_artificial_image: bool=False,
     ):
         """
         Args:
@@ -502,8 +474,8 @@ class TransformerEncoder(FairseqEncoder):
                   hidden states of shape `(src_len, batch, embed_dim)`.
                   Only populated if *return_all_hiddens* is True.
         """
-        if use_fake_image:
-            forward_scriptable = self.encode_with_fake_image
+        if use_artificial_image:
+            forward_scriptable = self.encode_with_artificial_image
         
         else:
             forward_scriptable = self.encode
@@ -517,13 +489,13 @@ class TransformerEncoder(FairseqEncoder):
                                   token_embeddings,
                                   sample_patch_num)
 
-    def encode_with_fake_image(
+    def encode_with_artificial_image(
         self,
         src_tokens,
         src_lengths,
-        fake_image_tokens,
+        artificial_image_tokens,
         patch_images_2: Optional[torch.Tensor] = None,
-        fake_image_token_offsets: Optional[torch.Tensor] = None,
+        artificial_image_token_offsets: Optional[torch.Tensor] = None,
         return_all_hiddens: bool = False,
         token_embeddings: Optional[torch.Tensor] = None,
         sample_patch_num: Optional[int] = None
@@ -545,20 +517,20 @@ class TransformerEncoder(FairseqEncoder):
         image_pos_embed = None
         image_pos_embed_2 = None
         
-        # fake_image_tokens are input_ids for 1024 text classes
-        # fake_image_token_offsets are offsets for embedding bag
-        bsz = fake_image_tokens.size(0)
-        fake_image_tokens = fake_image_tokens[fake_image_tokens != self.padding_idx]
+        # artificial_image_tokens are input_ids for 1024 text classes
+        # artificial_image_token_offsets are offsets for embedding bag
+        bsz = artificial_image_tokens.size(0)
+        artificial_image_tokens = artificial_image_tokens[artificial_image_tokens != self.padding_idx]
         
-        fake_image_token_offsets = rearrange(fake_image_token_offsets, '(b l) -> b l', b=bsz)
-        fake_image_token_offsets = torch.cat([fake_image_token_offsets.new_zeros(size=(bsz, 1)), fake_image_token_offsets], dim=1)
-        offset = torch.cat([fake_image_token_offsets.new_zeros(size=(1, )), fake_image_token_offsets[:-1,-1]]).cumsum(0)
-        fake_image_token_offsets = fake_image_token_offsets + offset.unsqueeze(1)
-        fake_image_token_offsets = fake_image_token_offsets[:, :-1].flatten()
+        artificial_image_token_offsets = rearrange(artificial_image_token_offsets, '(b l) -> b l', b=bsz)
+        artificial_image_token_offsets = torch.cat([artificial_image_token_offsets.new_zeros(size=(bsz, 1)), artificial_image_token_offsets], dim=1)
+        offset = torch.cat([artificial_image_token_offsets.new_zeros(size=(1, )), artificial_image_token_offsets[:-1,-1]]).cumsum(0)
+        artificial_image_token_offsets = artificial_image_token_offsets + offset.unsqueeze(1)
+        artificial_image_token_offsets = artificial_image_token_offsets[:, :-1].flatten()
 
-        image_embed = self.embed_tokens_bag(fake_image_tokens, offsets=fake_image_token_offsets)
+        image_embed = self.embed_tokens_bag(artificial_image_tokens, offsets=artificial_image_token_offsets)
         
-        h = w = 32
+        h = w = self.patch_image_size // 16
         image_embed_shape = (h, w)
         image_embed = rearrange(image_embed, '(b h w) d -> b d h w', b=bsz, h=image_embed_shape[0], w=image_embed_shape[1])
 
@@ -572,7 +544,7 @@ class TransformerEncoder(FairseqEncoder):
         image_embed = image_embed.flatten(2).transpose(1, 2)
         orig_num_patches = (self.orig_patch_image_size // 16) ** 2
         orig_hw= self.orig_patch_image_size // 16
-        if getattr(self.args, "interpolate_position", False) and image_num_patches > orig_num_patches:
+        if image_num_patches > orig_num_patches:
             old_image_position_ids = torch.arange(orig_hw).unsqueeze(0).expand(orig_hw, orig_hw) + \
                                     torch.arange(orig_hw).unsqueeze(1) * self.args.image_bucket_size + 1
             old_image_position_ids = old_image_position_ids.to(src_tokens.device)
@@ -593,29 +565,7 @@ class TransformerEncoder(FairseqEncoder):
 
         # embed tokens and positions
         if token_embeddings is None:
-            bsz, length = src_tokens.size()
-            src_tokens_flat = src_tokens.flatten()
-            
-            offset = self.dictionary.index('<seg_0>')
-            mask = src_tokens_flat < offset
-            
-            lang_tokens = src_tokens_flat[mask]
-            lang_embedding = self.embed_tokens(lang_tokens)
-            
-            seg_tokens = src_tokens_flat[~mask] - offset
-            seg_embedding = self.seg_embed_tokens(seg_tokens)
-            
-            token_embeddings = torch.cat([lang_embedding, seg_embedding], dim=0)
-            
-            all_idx = torch.arange(bsz*length)
-            lang_idx = all_idx[mask]
-            seg_idx = all_idx[~mask]
-            restore_idx = torch.cat([lang_idx, seg_idx], dim=0).argsort()
-            
-            token_embeddings = token_embeddings[restore_idx]
-            token_embeddings = token_embeddings.reshape(bsz, length, -1)
-            
-            # token_embeddings = self.embed_tokens(src_tokens)
+            token_embeddings = self.embed_tokens(src_tokens)
                 
         x = embed = self.embed_scale * token_embeddings
         if self.entangle_position_embedding and pos_embed is not None:
@@ -821,10 +771,13 @@ class TransformerEncoder(FairseqEncoder):
         if prompt_padding_mask is not None:
             encoder_padding_mask = torch.cat([prompt_padding_mask, encoder_padding_mask], dim=1)
 
-        image_position_idx = torch.arange(32).unsqueeze(0).expand(32, 32) + \
-                             torch.arange(32).unsqueeze(1) * self.args.image_bucket_size + 1
+
+        orig_num_patches = (self.orig_patch_image_size // 16) ** 2
+        orig_hw= self.orig_patch_image_size // 16
+        image_position_idx = torch.arange(orig_hw).unsqueeze(0).expand(orig_hw, orig_hw) + \
+                             torch.arange(orig_hw).unsqueeze(1) * self.args.image_bucket_size + 1
         image_position_idx = image_position_idx.view(-1).to(src_tokens.device)
-        image_position_ids = image_position_idx[None, :].expand(patch_images.size(0), 1024)
+        image_position_ids = image_position_idx[None, :].expand(patch_images.size(0), orig_num_patches)
 
         # encoder layers
         for idx, layer in enumerate(self.layers):
@@ -840,9 +793,9 @@ class TransformerEncoder(FairseqEncoder):
                 # self_attn_bias[:, :, :x.size(0) - src_tokens.size(1), :x.size(0) - src_tokens.size(1)] += \
                 #     self.get_image_rel_pos_bias(image_position_ids, idx)
                 image_rel_pos_bias = self.get_image_rel_pos_bias(image_position_ids, idx)
-                image_rel_pos_bias = rearrange(image_rel_pos_bias, 'b d (h1 w1) (h2 w2) -> (b h1 w1) d h2 w2', h1=32, w1=32, h2=32, w2=32)
+                image_rel_pos_bias = rearrange(image_rel_pos_bias, 'b d (h1 w1) (h2 w2) -> (b h1 w1) d h2 w2', h1=orig_hw, w1=orig_hw, h2=orig_hw, w2=orig_hw)
                 image_rel_pos_bias = F.interpolate(image_rel_pos_bias, size=image_embed_shape, mode='bilinear')
-                image_rel_pos_bias = rearrange(image_rel_pos_bias, '(b h1 w1) d h2 w2 -> (b h2 w2) d h1 w1', h1=32, w1=32, h2=image_embed_shape[0], w2=image_embed_shape[1])
+                image_rel_pos_bias = rearrange(image_rel_pos_bias, '(b h1 w1) d h2 w2 -> (b h2 w2) d h1 w1', h1=orig_hw, w1=orig_hw, h2=image_embed_shape[0], w2=image_embed_shape[1])
                 image_rel_pos_bias = F.interpolate(image_rel_pos_bias, size=image_embed_shape, mode='bilinear')
                 image_rel_pos_bias = rearrange(image_rel_pos_bias, '(b h2 w2) d h1 w1 -> b d (h1 w1) (h2 w2)', h1=image_embed_shape[0], w1=image_embed_shape[1], h2=image_embed_shape[0], w2=image_embed_shape[1])
                 self_attn_bias[:, :, :x.size(0) - src_tokens.size(1), :x.size(0) - src_tokens.size(1)] += image_rel_pos_bias
@@ -1019,6 +972,11 @@ class TransformerEncoder(FairseqEncoder):
             state_dict["encoder.embed_image_positions.weight"] = torch.cat(
                 [state_dict["encoder.embed_image_positions.weight"], new_pos_embed_to_add]
             )
+        if f"{name}.seg_embed_tokens.weight" in state_dict:
+            if self.seg_embed_tokens.weight.shape[0] != state_dict[f"{name}.seg_embed_tokens.weight"].shape[0]:
+                logger.info(f"Head num_classes mismatch: {self.seg_embed_tokens.weight.shape} vs. {state_dict[f'{name}.seg_embed_tokens.weight'].shape}. Deleting from the checkpoint.")
+                del state_dict[f"{name}.seg_embed_tokens.weight"]
+
         return state_dict
 
 class PromptEncoder(torch.nn.Module):
