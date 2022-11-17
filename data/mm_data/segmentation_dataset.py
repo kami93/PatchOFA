@@ -175,6 +175,12 @@ def collate(samples, pad_idx, eos_idx):
     patch_images = torch.stack([sample['patch_image'] for sample in samples], dim=0)
     patch_masks = torch.cat([sample['patch_mask'] for sample in samples])
 
+    if samples[0].get("ori_shape", None) is not None:
+        ori_shape = [x["ori_shape"] for x in samples]
+        
+    if samples[0].get("ori_semantic_seg", None) is not None:
+        ori_semantic_seg = [x["ori_semantic_seg"] for x in samples]
+
     prev_output_tokens = None
     target = None
     if samples[0].get("target", None) is not None:
@@ -233,7 +239,9 @@ def collate(samples, pad_idx, eos_idx):
         "aux_input": aux_input,
         "target": target,
         "downsampled_target": downsampled_target,
-        "text2seg_target": text2seg_target
+        "text2seg_target": text2seg_target,
+        "ori_shape": ori_shape,
+        "ori_semantic_seg": ori_semantic_seg,
     }
 
     return batch
@@ -378,6 +386,8 @@ class SegmentationDataset(OFADataset):
         results['gt_semantic_seg'] = segmentation_arr
         results['seg_fields'] = ['gt_semantic_seg']
 
+        ori_shape = image_arr.shape
+        ori_semantic_seg = segmentation_arr.copy()
         if self.split == 'train':
             aug_dict = self.image_transform(results)
             
@@ -436,7 +446,9 @@ class SegmentationDataset(OFADataset):
             "patch_mask": patch_mask,
             "target": target,
             "downsampled_target": downsampled_target,
-            "prev_output_tokens": prev_output_item
+            "prev_output_tokens": prev_output_item,
+            "ori_shape": ori_shape,
+            "ori_semantic_seg": ori_semantic_seg,
         }
 
         if self.artificial_image_type == 'none':

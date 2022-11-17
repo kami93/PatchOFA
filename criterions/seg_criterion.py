@@ -546,6 +546,12 @@ class SegCriterion(FairseqCriterion):
         (h, w) = sample['net_input']['patch_images'].shape[-2:]
         short_side = min(h, w)
 
+        if not model.training:
+            target = sample.get("ori_semantic_seg")[0] 
+            target = torch.from_numpy(rearrange(target, 'h w -> () (h w)')).long().to(classifier_scores_lowres.device) + self.seg_id_offset
+            ori_shape = sample['ori_shape']
+            (h, w) = ori_shape[0][:2]
+
         if isinstance(classifier_scores_lowres, list):
             h_cut_per_region = extra['h_cut_per_region']
             w_cut_per_region = extra['w_cut_per_region']
@@ -607,7 +613,10 @@ class SegCriterion(FairseqCriterion):
             resnet_postprocess_probability = extra.get("resnet_postprocess_probability")
             if resnet_postprocess_probability is not None:
                 resnet_postprocess_probability = self.upsample_logits(resnet_postprocess_probability, hp=hp, wp=wp, h=h, w=w) # bilinear upsample
-
+        if not model.training:
+            classifier_scores = classifier_scores[:,:-1]
+            if resnet_postprocess_probability is not None:
+                resnet_postprocess_probability = resnet_postprocess_probability[:,:-1]
         target_shape = target.shape
         assert target_shape == classifier_scores.shape[:-1]
 
