@@ -201,7 +201,10 @@ class SegCriterionConfig(FairseqDataclass):
     resnet_iters: int = field(
         default=0, metadata={"help": "resnet filtering iterations"}
     )
-    
+    sliding_inference: str = field(
+        default='false', metadata={"help": "whether to apply full attention in decoder"}
+    )
+
 def resolve_str_true_false(x):
     x = x.lower()
     if x == 'true':
@@ -306,6 +309,7 @@ class SegCriterion(FairseqCriterion):
         resnet_topk=3,
         resnet_prob_temperature=1.0,
         resnet_iters=0,
+        sliding_inference='false',
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -328,7 +332,7 @@ class SegCriterion(FairseqCriterion):
         self.unsupervised_segmentation = resolve_str_true_false(unsupervised_segmentation)
         self.full_context_alignment = resolve_str_true_false(full_context_alignment)
         self.init_seg_with_text = resolve_str_true_false(init_seg_with_text)
-        self.sliding_inference = True
+        self.sliding_inference = resolve_str_true_false(sliding_inference)
         
         self.resnet_topk = resnet_topk
         self.resnet_prob_temperature = resnet_prob_temperature
@@ -342,7 +346,8 @@ class SegCriterion(FairseqCriterion):
             self.constraint_start = int(constraint_start)
             self.constraint_end = int(constraint_end)
         
-        self.output_classes = task.cfg.num_seg_tokens                
+        self.output_classes = task.cfg.num_seg_tokens
+        logger.info(f"Sliding inference {self.sliding_inference}, ResNet iterations {self.resnet_iters}")
 
     def forward(self, model, sample, update_num=0, reduce=True, ema_model=None):
         """Compute the loss for the given sample.
