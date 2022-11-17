@@ -363,7 +363,7 @@ class SegCriterion(FairseqCriterion):
             logger.info(f"Restored iteration counts {self.iter}")
         self._update_iteration(sample, model, ema_model)
         
-        if self.unsupervised_segmentation:
+        if self.unsupervised_segmentation and model.training:
             net_output = model(full_context_alignment=self.full_context_alignment, aux_input=sample["aux_input"])
             imfree_output = net_output[1].get("aux_output")
             imfree_loss = self.compute_imfree_loss(model, imfree_output, sample, update_num, reduce=reduce)
